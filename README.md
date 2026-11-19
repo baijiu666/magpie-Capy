@@ -201,6 +201,8 @@ MAGPIE_CAPY_TOOL_SHIM=0   # 或 off / false；重启 magpie
 ## 边界
 
 - **必须保持 Capy 桌面端在线**：没有已连接设备时返回 503。
+- **不需要开着窗口**：关掉 Capy 主窗口只会隐藏到托盘，device tunnel 继续；插件照常可用。
+  设备隧道 / machine server 的取证见 [DEVICE-TUNNEL.md](./DEVICE-TUNNEL.md)。
 - **每个请求创建一个本机 Worktree**：会累积在 `~/.capy/worktrees/jam_*`；Capy 桌面端负责展示/清理。
 - **免费广告模型**：必须支持地区 + 代理出口；否则 `region_unsupported`。
 - **付费模型**：本机设备线程也可能扣 credits；零余额账号请用三个免费模型。
