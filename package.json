@@ -1,6 +1,6 @@
 {
   "name": "Capy",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "把 Capy（capy.ai）接进 magpie：纯无头设备、浏览器登录、3 个免费模型、原生 SSE、图片附件。",
   "repository": {
     "type": "git",

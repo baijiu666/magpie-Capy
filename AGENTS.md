@@ -5,7 +5,7 @@
 
 ## 一、这个插件的形状
 
-**纯无头：浏览器登录 → 自动注册 magpie-headless → device tunnel → 设备线程。不需要 Capy 桌面端。**
+**运行时纯无头：登录（本机导入或浏览器）→ 自动注册 magpie-headless → device tunnel → 设备线程。不要求 Capy 在运行。**
 
 ```
 用户            OpenAI 请求                      Capy App / device tunnel
@@ -24,6 +24,7 @@
 |---|---|
 | `src/constants.mjs` | 端点、provider、默认模型、TTL、图标 |
 | `src/models.mjs` | 62 个公共模型快照 + 2 个 App 内 free-with-ads 模型 |
+| `src/local.mjs` | 本机导入**只用于登录**：读 `%APPDATA%\Capy` 登录态换 Clerk 会话；不要求桌面端运行 |
 | `src/browser.mjs` | 浏览器登录：临时 Chromium + CDP 读 `__client` Cookie（Google/GitHub/Passkey/邮箱） |
 | `src/auth.mjs` | Clerk 换票（azp）、读账号/组织、签 API Key、续期 |
 | `src/catalog.mjs` | `GET /models`、模型解析、3 个免费模型的 `free` 标记 |
@@ -58,9 +59,10 @@
 ## 三、命令
 
 ```bash
-node --test                 # 96 个离线测试
+node --test                 # 116 个离线测试
 magpie plugin add "D:\AI\magpie\magpie-Capy"
-magpie plugin login capy 1  # 浏览器登录 https://capy.ai/sign-in（Google/GitHub/Passkey/邮箱）
+magpie plugin login capy 1  # 本机导入（只读登录态，不需要运行桌面端）
+magpie plugin login capy 2  # 浏览器登录 https://capy.ai/sign-in（Google/GitHub/Passkey/邮箱）
 magpie plugin list | grep -A1 capy
 
 # 走真实网关（本机 3425）
@@ -87,7 +89,7 @@ curl -sS http://127.0.0.1:3425/v1/chat/completions \
 - 不要把 Capy 的 client JWT / API Key / `capyd_` token 打进日志或错误文案。
 - 不要把 API Key 用于 `/app/*`（只认 Clerk token），也不要把 Clerk token 用于 `/api/v1/*`（只认 API Key）。
 - 不要伪造广告曝光/`impUrl`；插件只声明 App 能力位，不伪造曝光。
-- 不要再引入 Capy 桌面端依赖（不读 `%APPDATA%\Capy`、不要求运行 Capy.exe）。
+- 运行时不依赖 Capy 桌面端；本机导入允许**只读** `%APPDATA%\Capy` 的登录态，但绝不能要求 Capy.exe 在运行。
 - 不要声称无头设备能跑终端/浏览器/写文件；它只有最小 machine server。
 - 不要声称原生 OpenAI tools：默认是提示词桥，Capy agent 会优先用自己的工具。
 - 不要声称 temperature / top_p / max_tokens / stop / response_format / PDF 解析。

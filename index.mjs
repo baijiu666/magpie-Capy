@@ -37,6 +37,7 @@ import {
   staticModels,
 } from "./src/catalog.mjs"
 import { chatCompletions } from "./src/chat.mjs"
+import { CapyLocalImportError, readCapyInstall } from "./src/local.mjs"
 import {
   HEADLESS_NAME,
   HeadlessDevice,
@@ -72,6 +73,7 @@ async function readJsonBody(input, init) {
 }
 
 function loginErrorText(error) {
+  if (error instanceof CapyLocalImportError) return error.message
   const status = Number(error?.status) || 0
   const code = String(error?.code ?? "")
   if (status === 401) return "Capy 登录已失效，请重新登录"
@@ -95,6 +97,7 @@ export const CapyAuthPlugin = async (_ctx = {}, options = {}) => {
     },
   })
   const findBrowserImpl = typeof options?.findBrowser === "function" ? options.findBrowser : findBrowser
+  const readLocalImpl = typeof options?.readLocal === "function" ? options.readLocal : readCapyInstall
   const chromiumLoginImpl = typeof options?.chromiumLogin === "function" ? options.chromiumLogin : chromiumLogin
 
   let maxConcurrency = DEFAULT_MAX_CONCURRENCY
@@ -259,6 +262,40 @@ export const CapyAuthPlugin = async (_ctx = {}, options = {}) => {
 
       // ═══ ② 登录 ═══════════════════════════════════════════════
       methods: [
+        {
+          type: "oauth",
+          label: "从本机 Capy 客户端导入（只用于登录，不需要运行桌面端）",
+          async authorize() {
+            // 只读本机登录态换 Clerk 会话；对话仍然走无头设备，不需要启动 Capy。
+            const probe = Promise.resolve()
+              .then(async () => {
+                const local = await readLocalImpl()
+                return await completeLogin(fetchImpl, {
+                  clientJwt: local.clientJwt,
+                  sessionId: local.sessionId,
+                  userId: local.userId,
+                  orgId: local.orgId,
+                  accountId: local.accountId,
+                  source: "capy-desktop",
+                })
+              })
+            probe.catch(() => {})
+            return {
+              url: BASE,
+              opened: true,
+              method: "auto",
+              instructions: "正在读取本机 Capy 登录态（只读取登录凭据，不需要启动 Capy 桌面端）…",
+              async callback() {
+                try {
+                  return await probe
+                } catch (error) {
+                  return { type: "failed", error: loginErrorText(error) }
+                }
+              },
+            }
+          },
+        },
+
         {
           type: "oauth",
           label: "浏览器登录（Google / GitHub / Passkey / 邮箱）",

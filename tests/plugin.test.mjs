@@ -108,15 +108,31 @@ test("config 声明 provider + 64 个静态模型", async () => {
   assert.equal(Object.keys(cfg.provider.capy.models).length, 64)
 })
 
-test("auth.methods 只有一条：浏览器登录", async () => {
+test("auth.methods 两条：本机导入（只登录）+ 浏览器登录", async () => {
   const plugin = await CapyAuthPlugin({}, { proxy: false, headless: fakeHeadless, fetch: fetchForTests() })
   assert.equal(plugin.auth.provider, "capy")
-  assert.equal(plugin.auth.methods.length, 1)
-  assert.match(plugin.auth.methods[0].label, /浏览器/u)
+  assert.equal(plugin.auth.methods.length, 2)
+  assert.match(plugin.auth.methods[0].label, /本机/u)
+  assert.match(plugin.auth.methods[1].label, /浏览器/u)
   assert.equal(typeof plugin.auth.refresh, "function")
   assert.equal(typeof plugin.auth.loader, "function")
   assert.equal(typeof plugin.auth.usage, "function")
   assert.equal(plugin.auth.checkin, undefined)
+})
+
+test("本机导入的 authorize 立即返回（不在 authorize 里等用户/网络）", async () => {
+  const plugin = await CapyAuthPlugin({}, {
+    proxy: false,
+    headless: fakeHeadless,
+    fetch: fetchForTests(),
+    readLocal: () => new Promise(() => {}),
+  })
+  const started = Date.now()
+  const value = await plugin.auth.methods[0].authorize()
+  assert.ok(Date.now() - started < 2000)
+  assert.equal(value.opened, true)
+  assert.equal(value.method, "auto")
+  assert.equal(typeof value.callback, "function")
 })
 
 test("loader：GET /models 返回 OpenAI 形状", async () => {

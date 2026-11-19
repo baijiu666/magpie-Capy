@@ -15,7 +15,8 @@ Capy 桌面端不是登录器，它是一台 **device**：Worktree、终端、�
 4. 实现最小 machine server（够文本/图片对话）；
 5. device token 用 Windows DPAPI 加密存在本机。
 
-**不需要 Capy 桌面端、不需要 `%APPDATA%\Capy` 的登录凭据。**
+**运行时不需要 Capy 桌面端，也不读 `%APPDATA%\Capy` 的登录凭据。**
+（「本机导入」登录方式会只读这些凭据换 Clerk 会话，但不要求 Capy 运行。）
 
 ## 1. 设备码配对（无需桌面端）
 
@@ -138,4 +139,4 @@ Authorization: Bearer capyd_…
 | `%LOCALAPPDATA%\magpie-capy\headless-device.json` | `{version, orgId, deviceId, name, tokenCiphertext}`；token 用 Windows DPAPI 加密 |
 | `~/.capy/worktrees/jam_*` | 无头设备创建的 Worktree |
 
-旧版桌面端路径（`device-credentials.json` / `Local State` / `session-credential.json`）已不再读取。
+旧版桌面端路径（`device-credentials.json` / `Local State` / `session-credential.json`）在对话运行时不读取；只有「本机导入」登录会只读它们。

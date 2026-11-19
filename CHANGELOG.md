@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1 — 2026-11-20
+
+恢复「从本机 Capy 客户端导入」登录方式。
+
+- 本机导入**只用于登录**：读 `%APPDATA%\Capy` 的登录态换 Clerk 会话，**不要求 Capy 桌面端运行**。
+- 对话运行时仍然是无头设备：自动注册 `magpie-headless`、device tunnel、最小 machine server。
+- 重命名/恢复 `src/local.mjs` 与 `tests/local.test.mjs`；登录方式回到两条（本机导入 / 浏览器）。
+- 116 个离线测试。
+
 ## 0.5.0 — 2026-11-20
 
 **去掉 Capy 桌面端依赖，改成纯无头设备。**

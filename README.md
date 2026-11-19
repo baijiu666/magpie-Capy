@@ -2,26 +2,28 @@
 
 把 [Capy](https://capy.ai)（Scrapybara 的云端 coding agent）接进 [magpie](https://usemagpie.ai)。
 
-**纯无头**：浏览器登录 + 自动注册 `magpie-headless` 设备 + device tunnel。**不需要 Capy 桌面端**，
-不需要开着窗口/进程，也不读 `%APPDATA%\Capy` 的登录凭据。
+**运行时纯无头**：对话走自动注册的 `magpie-headless` 设备 + device tunnel。**不需要启动/运行 Capy 桌面端**。
+登录有两条路：浏览器登录，或「从本机 Capy 客户端导入」——后者**只读登录凭据**，不要求 Capy 在运行。
 
 - **Provider id**：`capy`
 - **默认模型**：`particle/particle-1`（$0.00，免费）
 - **模型**：64 个（公共目录 62 个 + 2 个 App 内免费广告模型）
 - **免费标记**：3 个 `free: true`，其余 `free: false`；不显示倍率/单价
 - **能力**：流式对话、思考档位、图片/附件、无头设备、额度卡片
-- **登录**：浏览器登录（Google / GitHub / Passkey / 邮箱）
+- **登录**：本机客户端导入（只登录）/ 浏览器登录（Google / GitHub / Passkey / 邮箱）
 
 ## 快速开始
 
 ```bash
 magpie plugin add https://github.com/baijiu666/magpie-Capy
-magpie plugin login capy 1     # 浏览器登录（打开 https://capy.ai/sign-in）
+magpie plugin login capy 1     # 从本机 Capy 客户端导入（只读登录态，不需要运行桌面端）
+# 或
+magpie plugin login capy 2     # 浏览器登录（打开 https://capy.ai/sign-in）
 ```
 
 首次对话会自动：
 
-1. 用浏览器登录的 Clerk 会话调 `POST /app/devices/code` 拿设备码；
+1. 用登录得到的 Clerk 会话调 `POST /app/devices/code` 拿设备码；
 2. 自动 `code/approve` + `code/poll`，注册一台名为 **`magpie-headless`** 的设备；
 3. 把 `capyd_…` device token 用 Windows DPAPI 加密存到本机；
 4. 连 `wss://device-tunnel-production.cloud.capy.ai/tunnel`，发 `hello` / `ready`；
@@ -145,12 +147,12 @@ Capy 线程协议没有 OpenAI 原生 tools 通道；插件把 `body.tools` 写�
 | `%LOCALAPPDATA%\magpie-capy\headless-device.json` | 无头设备状态（DPAPI 加密的 `capyd_…` token） |
 | `~/.config/magpie/plugin-auth.json` | magpie 保存的 API Key + Clerk 会话 |
 | `~/.capy/worktrees/jam_*` | 无头设备创建的 Worktree |
-
-**不再读取** `%APPDATA%\Capy\device-credentials.json` / `Local State` / `session-credential.json`。
+| `%APPDATA%\Capy\session-credential.json` / `device-credentials.json` / `Local State` | **只有「本机导入」登录时只读**；对话运行时不读，也不要求 Capy 在运行 |
 
 ## 边界
 
-- **纯无头**：不需要 Capy 桌面端，但无头设备只实现最小 machine server；终端/浏览器/写文件工具不可用。
+- **运行时纯无头**：不需要启动 Capy 桌面端；本机导入只读登录态，不提供算力。
+- **无头设备只实现最小 machine server**：终端/浏览器/写文件工具不可用。
 - **免费广告模型**：需要支持地区 + 代理出口；否则 `region_unsupported`。
 - **付费模型**：仍受 Capy credits / 套餐限制。
 - **工具调用**：只有提示词级 best-effort 桥。
@@ -159,7 +161,7 @@ Capy 线程协议没有 OpenAI 原生 tools 通道；插件把 `body.tools` 写�
 ## 开发
 
 ```bash
-npm test                 # 96 个离线测试（auth/catalog/chat/proxy/headless/attachments/tools/usage/browser）
+npm test                 # 116 个离线测试（auth/local/catalog/chat/proxy/headless/attachments/tools/usage/browser）
 ```
 
 设备隧道取证见 [DEVICE-TUNNEL.md](./DEVICE-TUNNEL.md)。
