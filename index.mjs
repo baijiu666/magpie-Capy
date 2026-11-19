@@ -22,6 +22,10 @@ import {
 import {
   apiKeyOf,
   completeLogin,
+  listDevices,
+  mintSessionJwt,
+  parseRefresh,
+  pickDevice,
   refreshCredential,
 } from "./src/auth.mjs"
 import { chromiumLogin, findBrowser } from "./src/browser.mjs"
@@ -129,6 +133,37 @@ export const CapyAuthPlugin = async (_ctx = {}, options = {}) => {
       if (!renewed?.access) throw error
       const merged = { ...auth, ...renewed, metadata: { ...(auth?.metadata ?? {}), ...(renewed.metadata ?? {}) } }
       return await run(merged)
+    }
+  }
+
+  // 额度卡片里的「桌面端」状态：浏览器登录只拿到登录态，免费模型还需要一台在线设备。
+  // 15 秒缓存，避免每次刷新额度都 mint JWT + 列设备。
+  const deviceCache = new Map()
+  const DEVICE_TTL_MS = 15_000
+  async function deviceStatus(auth) {
+    if (!auth?.refresh) return { connected: false, unknown: true }
+    const key = apiKeyOf(auth).slice(-16) || String(auth?.uid || "").slice(-16)
+    const hit = deviceCache.get(key)
+    if (hit && Date.now() - hit.at < DEVICE_TTL_MS) return hit.value
+    const cred = parseRefresh(auth.refresh)
+    if (!cred?.clientJwt || !cred?.sessionId) return { connected: false, unknown: true }
+    try {
+      const jwt = await mintSessionJwt(fetchImpl, {
+        clientJwt: cred.clientJwt,
+        sessionId: cred.sessionId,
+      })
+      const orgId = String(cred.orgId || auth?.metadata?.orgId || "").trim()
+      if (!orgId) return { connected: false, unknown: true }
+      const devices = await listDevices(fetchImpl, jwt, orgId)
+      const device = pickDevice(devices, cred.deviceId || auth?.metadata?.deviceId || "")
+      const value = {
+        connected: Boolean(device),
+        name: String(device?.name ?? ""),
+      }
+      deviceCache.set(key, { at: Date.now(), value })
+      return value
+    } catch {
+      return { connected: false, unknown: true }
     }
   }
 
@@ -350,11 +385,29 @@ export const CapyAuthPlugin = async (_ctx = {}, options = {}) => {
         const auth = await getAuth()
         if (!auth?.access) return { error: "未登录", windows: [] }
         try {
-          return await computeUsage({
+          const usage = await computeUsage({
             fetchImpl,
             apiKey: auth.access,
             cacheKey: cacheKeyOf(auth),
           })
+          if (!usage.error) {
+            const status = await deviceStatus(auth)
+            usage.windows = [
+              ...(usage.windows || []),
+              {
+                name: "桌面端",
+                // 只是展示项；aside 不参与路由排序，但 used 仍必须是有限值。
+                used: status.connected ? 0 : 100,
+                aside: true,
+                display: status.unknown
+                  ? "状态未知（请打开 Capy / 重新登录）"
+                  : status.connected
+                    ? `已连接${status.name ? ` · ${status.name}` : ""}`
+                    : "未连接（免费模型需打开 Capy）",
+              },
+            ]
+          }
+          return usage
         } catch (error) {
           if (isAuthFailure(error)) {
             return { error: "Capy 登录已失效，请重新登录", windows: [], signIn: "expired" }

@@ -58,6 +58,7 @@
 | 16 | 带图片建线程 400 空 body | App 的 `files[]` 不是公共 API 的 `{fileId,name}`，必须带 **`{fileId,name,mediaType,sizeBytes}`**；`sizeBytes` 必须是整数 |
 | 17 | 图片上传后模型看不见 | `POST /api/v1/files` 只给预签名 URL；必须再 PUT 字节（Content-Type/Length 与声明一致，不带 Authorization），然后 jam 带 `files` |
 | 18 | 想用 OpenAI tools 却拿不到 `tool_calls` | Capy agent 会优先用自己的工具，并明确拒绝“只输出 JSON”的约定。默认 `toolcall:true` + best-effort 桥；模型不配合时退回文本并打 warning。`MAGPIE_CAPY_TOOL_SHIM=0` 关闭 |
+| 19 | 浏览器登录后免费模型 503「没有已连接的桌面端」 | 浏览器登录只给身份 + API Key，不给算力。免费模型必须在本机 Worktree 跑；用同一账号打开 Capy 桌面端，或充值后走云端。额度卡片的「桌面端」窗口会显示连接状态 |
 
 ## 三、命令
 

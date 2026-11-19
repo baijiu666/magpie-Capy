@@ -219,7 +219,9 @@ export async function resolveDeviceSession(fetchImpl, auth, { signal } = {}) {
   const device = pickDevice(devices, cred.deviceId || auth?.metadata?.deviceId || "")
   if (!device) {
     throw upstreamError(
-      "没有已连接的 Capy 桌面端。请打开 Capy 桌面端并保持登录（本机 / Worktree 模式），再重试。",
+      "这个账号没有已连接的 Capy 桌面端。免费模型必须在本机 Capy 的 Worktree 里运行；"
+      + "浏览器登录只提供登录态，不提供算力。请用同一账号打开 Capy 桌面端并保持在线"
+      + "（本机 / Worktree 模式），或充值后使用云端模型。",
       503,
       { code: CODES.upstreamUnavailable },
     )

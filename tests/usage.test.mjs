@@ -13,7 +13,7 @@ test("buildUsage：无余额（remainingDollars:null, unlimited:false）→ used
   assert.match(usage.windows[0].display, /无可用余额/u)
 })
 
-test("buildUsage：有余额 → used=0；消费/Token 是 aside 文本", () => {
+test("buildUsage：有余额 → used=0；只保留 Token aside，不再显示本期消费", () => {
   const usage = buildUsage(
     { totals: { totalDollars: 3.5 }, tokens: { inputTokens: 1500, outputTokens: 200 } },
     { currency: "USD", remainingDollars: 12.25, unlimited: false, periodEnd: "2026-12-01T00:00:00.000Z" },
@@ -21,8 +21,10 @@ test("buildUsage：有余额 → used=0；消费/Token 是 aside 文本", () => 
   assert.equal(usage.windows[0].used, 0)
   assert.match(usage.windows[0].display, /\$12\.25/u)
   assert.equal(usage.windows[0].resetsAt, "2026-12-01T00:00:00.000Z")
+  assert.ok(usage.windows.every((item) => item.name !== "本期消费"))
   const aside = usage.windows.filter((item) => item.aside)
-  assert.equal(aside.length, 2)
+  assert.equal(aside.length, 1)
+  assert.match(aside[0].name, /Token/u)
   assert.ok(aside.every((item) => item.used === 0 && typeof item.display === "string"))
 })
 

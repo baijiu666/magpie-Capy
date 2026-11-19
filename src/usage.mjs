@@ -82,17 +82,6 @@ export function buildUsage(usage, balance) {
     })
   }
 
-  const total = Number(usage?.totals?.totalDollars)
-  if (Number.isFinite(total)) {
-    windows.push({
-      name: "本期消费",
-      used: 0,
-      aside: true,
-      display: money(total, currency),
-      unit: currency,
-    })
-  }
-
   const tokens = tokensText(usage?.tokens)
   if (tokens) {
     windows.push({
