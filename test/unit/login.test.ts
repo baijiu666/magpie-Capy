@@ -17,6 +17,7 @@ function fakeApp(overrides: Partial<CapyAppPort> = {}): CapyAppPort {
       return { plaintext: key, keyId: "key_1" };
     },
     async listDevices() { return []; },
+    async renameDevice() {},
     async startDeviceCode() { throw new Error("unused"); },
     async approveDeviceCode() {},
     async pollDeviceCode() { throw new Error("unused"); },

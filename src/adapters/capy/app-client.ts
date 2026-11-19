@@ -122,6 +122,20 @@ export class CapyAppClient implements CapyAppPort {
     });
   }
 
+  async renameDevice(
+    jwt: string,
+    orgId: string,
+    deviceId: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.json(
+      jwt,
+      `/orgs/${encodeURIComponent(orgId)}/devices/${encodeURIComponent(deviceId)}`,
+      { method: "PATCH", body: JSON.stringify({ name }), ...(signal ? { signal } : {}) },
+    );
+  }
+
   async startDeviceCode(
     jwt: string,
     input: { hostname: string; os: string; arch: string },

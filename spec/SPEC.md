@@ -93,6 +93,7 @@
 ### FR-2 无头设备
 
 - **FR-2.1 自动配对**：`POST /app/devices/code` → auto approve → poll → `capyd_…`。
+  设备名默认取主机名（如 `baijiu`），已有设备通过 `PATCH .../devices/{id}` 自动重命名。
 - **FR-2.2 状态持久化**：device token 存用户目录。Windows 用 DPAPI；macOS/Linux 用 0600 权限文件。
   位置：`%LOCALAPPDATA%\magpie-capy` / `~/Library/Application Support/magpie-capy` /
   `${XDG_STATE_HOME:-~/.local/state}/magpie-capy`；`MAGPIE_CAPY_STATE_DIR` 可覆盖。
@@ -100,11 +101,13 @@
   登记上报 `{hostname, os, arch}`，`os` ∈ `win32 | darwin | linux`；宿主有 WebSocket 即可。
 - **FR-2.4 断线**：同一 token 先重连 3 次；只有服务端明确拒绝 token 才重新配对，
   避免网络抖动在账号里堆积半成品设备。
-- **FR-2.5 最简 machine RPC**：
+- **FR-2.5 machine RPC**：
+  - `bash` / `bash_output`（当前用户权限、超时/输出上限）
+  - `read` / `write` / `edit` / `file_read` / `file_write`
   - `worktree_ensure` / `worktree_list`
   - `volume_landed` / `volume_probe`
   - `POST /v1/git/capture`
-  - 其他 handler → `MachineServer.Unavailable`
+  - 浏览器 / computer handler → `MachineServer.Unavailable`
 - **FR-2.6 不跨组织**：设备 org 必须与账号 org 一致；不一致 → 明确错误。
 
 ### FR-3 模型目录

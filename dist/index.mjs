@@ -958,6 +958,9 @@ class CapyAppClient {
       }];
     });
   }
+  async renameDevice(jwt, orgId, deviceId, name, signal) {
+    await this.json(jwt, `/orgs/${encodeURIComponent(orgId)}/devices/${encodeURIComponent(deviceId)}`, { method: "PATCH", body: JSON.stringify({ name }), ...signal ? { signal } : {} });
+  }
   async startDeviceCode(jwt, input, signal) {
     const body = await this.json(jwt, "/devices/code", {
       method: "POST",
@@ -1670,6 +1673,8 @@ function sleep(ms, signal) {
 }
 
 // src/adapters/capy/device-tunnel.ts
+import { spawn as spawn2 } from "child_process";
+import { createHash } from "crypto";
 import fs3 from "fs";
 import os4 from "os";
 import path3 from "path";
@@ -1693,6 +1698,23 @@ function deviceOs2() {
 }
 function deviceArch2() {
   return process.arch === "arm64" ? "arm64" : "x86_64";
+}
+function defaultDeviceName() {
+  const override = String(process.env.MAGPIE_CAPY_DEVICE_NAME ?? "").trim();
+  if (override)
+    return override.slice(0, 80);
+  let host = "";
+  try {
+    host = os4.hostname();
+  } catch {}
+  let user = "";
+  try {
+    user = os4.userInfo().username;
+  } catch {}
+  if (!user)
+    user = String(process.env.USERNAME ?? process.env.USER ?? "").trim();
+  const raw = host || user || "capy-headless";
+  return raw.replace(/[^A-Za-z0-9._@-]+/gu, "-").replace(/^-+|-+$/gu, "").slice(0, 80) || "capy-headless";
 }
 function stateDir() {
   const override = String(process.env.MAGPIE_CAPY_STATE_DIR ?? "").trim();
@@ -1777,7 +1799,117 @@ function decodeDataFrame(bytes) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   return { streamId: view.getUint32(0), body: bytes.subarray(4) };
 }
-function machineResult(handler, params, worktreeBase) {
+function ok(result) {
+  return { status: "succeeded", result };
+}
+function fail(code, message) {
+  return { status: "failed", error: { code, message } };
+}
+function fileFailure(error) {
+  const code = error?.code;
+  const message = error instanceof Error ? error.message : String(error);
+  if (code === "ENOENT")
+    return fail("MachineServer.FileError", `not-found: ${message}`);
+  if (code === "EISDIR")
+    return fail("MachineServer.FileError", `is-directory: ${message}`);
+  if (code === "EACCES" || code === "EPERM")
+    return fail("MachineServer.FileError", `permission-denied: ${message}`);
+  return fail("MachineServer.FileError", `other: ${message}`);
+}
+function resolveIn(cwd, raw) {
+  const value = String(raw ?? "").trim();
+  if (!value)
+    throw new Error("path is required");
+  return path3.isAbsolute(value) ? path3.normalize(value) : path3.resolve(cwd, value);
+}
+function sha256(text) {
+  return createHash("sha256").update(text).digest("hex");
+}
+async function runBash(params, cwd) {
+  const command = String(params.command ?? "");
+  if (!command.trim())
+    return fail("MachineServer.Bash", "bash command is empty");
+  const timeoutSeconds = Math.max(1, Math.min(600, Number(params.timeoutSeconds) || 120));
+  const runCwd = path3.resolve(cwd);
+  try {
+    fs3.mkdirSync(runCwd, { recursive: true });
+  } catch {}
+  const shell = String(process.env.MAGPIE_CAPY_BASH ?? "").trim() || "bash";
+  const env = {
+    ...process.env,
+    PS1: "",
+    NO_COLOR: "1",
+    TERM: "dumb",
+    LANG: "C.UTF-8",
+    LC_ALL: "C.UTF-8",
+    PAGER: "cat",
+    GIT_PAGER: "cat",
+    GH_PAGER: "cat",
+    COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+  };
+  const startedAt = Date.now();
+  const maxChars = 4 * 1024 * 1024;
+  return await new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+    let child;
+    try {
+      child = spawn2(shell, ["-lc", command], { cwd: runCwd, env, windowsHide: true });
+    } catch (error) {
+      resolve(fail("MachineServer.Bash", `Failed to start bash: ${error instanceof Error ? error.message : String(error)}`));
+      return;
+    }
+    const append = (current, chunk) => {
+      if (current.length >= maxChars)
+        return current;
+      return current + chunk.toString("utf8").slice(0, maxChars - current.length);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+      if (process.platform === "win32" && child.pid) {
+        try {
+          spawn2("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }).unref();
+        } catch {}
+      }
+    }, timeoutSeconds * 1000);
+    timer.unref?.();
+    child.stdout?.on("data", (chunk) => {
+      stdout = append(stdout, chunk);
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr = append(stderr, chunk);
+    });
+    child.on("error", (error) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(fail("MachineServer.Bash", `Failed to start bash: ${error.message}`));
+    });
+    child.on("close", (code) => {
+      if (settled)
+        return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ok({
+        kind: "bash",
+        stdout,
+        stderr,
+        exitCode: typeof code === "number" ? code : -1,
+        durationMs: Date.now() - startedAt,
+        timedOut,
+        isError: timedOut,
+        ...timedOut ? { landingNote: "Command timed out and was stopped." } : {}
+      }));
+    });
+  });
+}
+async function machineResult(handler, params, worktreeBase) {
   if (handler === "worktree_ensure") {
     const root = String(params.root ?? "");
     let created = false;
@@ -1785,53 +1917,123 @@ function machineResult(handler, params, worktreeBase) {
       const base = path3.resolve(worktreeBase);
       const resolved = path3.resolve(root);
       if (resolved !== base && !resolved.startsWith(`${base}${path3.sep}`)) {
-        return { status: "failed", error: { code: "MachineServer.Refused", message: "worktree root outside worktreeBase" } };
+        return fail("MachineServer.Refused", "worktree root outside worktreeBase");
       }
       created = !fs3.existsSync(resolved);
       fs3.mkdirSync(resolved, { recursive: true });
     }
-    return { status: "succeeded", result: { root, created, checkouts: [] } };
+    return ok({ root, created, checkouts: [] });
   }
   if (handler === "worktree_list") {
-    return { status: "succeeded", result: { kind: "worktree_list", entries: [] } };
+    return ok({ kind: "worktree_list", entries: [] });
   }
   if (handler === "volume_landed") {
     const mounts = Array.isArray(params.mounts) ? params.mounts : [];
-    return {
-      status: "succeeded",
-      result: {
-        kind: "volume_landed",
-        mounts: mounts.map((mount) => ({
-          mountPath: String(mount?.mountPath ?? ""),
-          current: true
-        })),
-        landing: false,
-        checkpoints: false,
-        directories: [],
-        unretained: [],
-        handback: true
-      }
-    };
+    return ok({
+      kind: "volume_landed",
+      mounts: mounts.map((mount) => ({
+        mountPath: String(mount?.mountPath ?? ""),
+        current: true
+      })),
+      landing: false,
+      checkpoints: false,
+      directories: [],
+      unretained: [],
+      handback: true
+    });
   }
   if (handler === "volume_probe") {
     const mounts = Array.isArray(params.mounts) ? params.mounts : [];
-    return {
-      status: "succeeded",
-      result: {
-        mounts: mounts.map((mount) => ({
-          mountPath: String(mount?.mountPath ?? ""),
-          state: "current"
-        }))
-      }
-    };
+    return ok({
+      mounts: mounts.map((mount) => ({
+        mountPath: String(mount?.mountPath ?? ""),
+        state: "current"
+      }))
+    });
   }
-  return {
-    status: "failed",
-    error: {
-      code: "MachineServer.Unavailable",
-      message: `\u65E0\u5934\u8BBE\u5907\u672A\u5B9E\u73B0 ${handler || "unknown"}\uFF1B\u7EC8\u7AEF/\u6D4F\u89C8\u5668/\u5199\u6587\u4EF6\u7B49\u5DE5\u5177\u4E0D\u4F1A\u6267\u884C\u3002`
+  if (handler === "bash")
+    return await runBash(params, worktreeBase);
+  if (handler === "bash_output")
+    return ok({ kind: "not-running" });
+  if (handler === "read") {
+    try {
+      const file = resolveIn(worktreeBase, params.path);
+      const text = fs3.readFileSync(file, "utf8");
+      const offset = Math.max(1, Number(params.offset) || 1);
+      const limit = Math.max(1, Math.min(1e4, Number(params.limit) || 2000));
+      const maxChars = Math.max(200, Math.min(1e5, Number(params.maxChars) || 20000));
+      const all = text.split(/\r?\n/u);
+      const content = all.slice(offset - 1, offset - 1 + limit).map((line) => line.length > maxChars ? `${line.slice(0, maxChars)}... (line truncated to ${maxChars} chars)` : line).join(`
+`);
+      return ok({ kind: "read", content, offset, totalLines: all.length, isError: false });
+    } catch (error) {
+      return fileFailure(error);
     }
-  };
+  }
+  if (handler === "write") {
+    try {
+      const file = resolveIn(worktreeBase, params.path);
+      const content = String(params.content ?? "");
+      fs3.mkdirSync(path3.dirname(file), { recursive: true });
+      fs3.writeFileSync(file, content, "utf8");
+      return ok({ kind: "write", path: file, bytes: Buffer.byteLength(content), isError: false });
+    } catch (error) {
+      return fileFailure(error);
+    }
+  }
+  if (handler === "edit") {
+    try {
+      const file = resolveIn(worktreeBase, params.path);
+      const oldString = String(params.oldString ?? "");
+      const newString = String(params.newString ?? "");
+      if (!oldString || oldString === newString) {
+        return fail("MachineServer.FileError", "oldString must be non-empty and differ from newString");
+      }
+      const text = fs3.readFileSync(file, "utf8");
+      const count = text.split(oldString).length - 1;
+      if (count === 0)
+        return fail("MachineServer.FileError", `The text was not found in ${String(params.path)}`);
+      if (count > 1 && params.replaceAll !== true) {
+        return fail("MachineServer.FileError", `Found ${count} occurrences; provide more context or replaceAll`);
+      }
+      const next = params.replaceAll === true ? text.split(oldString).join(newString) : text.replace(oldString, newString);
+      fs3.writeFileSync(file, next, "utf8");
+      return ok({ kind: "edit", path: file, replacements: count, isError: false });
+    } catch (error) {
+      return fileFailure(error);
+    }
+  }
+  if (handler === "file_read") {
+    try {
+      const file = resolveIn(worktreeBase, params.path);
+      const text = fs3.readFileSync(file, "utf8");
+      return ok({ kind: "read", path: file, content: { text }, sha: sha256(text), isError: false });
+    } catch (error) {
+      if (error?.code === "ENOENT")
+        return ok({ kind: "missing", isError: false });
+      return fileFailure(error);
+    }
+  }
+  if (handler === "file_write") {
+    try {
+      const file = resolveIn(worktreeBase, params.path);
+      const content = String(params.content ?? "");
+      let currentSha = null;
+      try {
+        currentSha = sha256(fs3.readFileSync(file, "utf8"));
+      } catch {}
+      const baseSha = typeof params.baseSha === "string" ? params.baseSha : null;
+      if (baseSha !== null && currentSha !== baseSha) {
+        return ok({ kind: "conflict", currentSha, isError: false });
+      }
+      fs3.mkdirSync(path3.dirname(file), { recursive: true });
+      fs3.writeFileSync(file, content, "utf8");
+      return ok({ kind: "written", sha: sha256(content), bytes: Buffer.byteLength(content), isError: false });
+    } catch (error) {
+      return fileFailure(error);
+    }
+  }
+  return fail("MachineServer.Unavailable", `\u65E0\u5934\u8BBE\u5907\u672A\u5B9E\u73B0 ${handler || "unknown"}\uFF1B\u6D4F\u89C8\u5668/computer \u7B49\u5DE5\u5177\u4E0D\u4F1A\u6267\u884C\u3002`);
 }
 
 class HeadlessDevice {
@@ -1844,6 +2046,7 @@ class HeadlessDevice {
   readyResolve = null;
   readyReject = null;
   streams = new Map;
+  activeRoot = null;
   constructor(options) {
     this.credential = options.credential;
     const Impl = options.WebSocketImpl ?? globalThis.WebSocket;
@@ -1977,7 +2180,7 @@ class HeadlessDevice {
     stream.body = Buffer.concat([stream.body, Buffer.from(frame.body)]);
     const length = Number(headerValue(stream.headers, "content-length") || 0);
     if (!length || stream.body.length >= length)
-      this.handleStream(stream);
+      this.runStream(stream);
   }
   onControl(text) {
     let frame;
@@ -2015,10 +2218,18 @@ class HeadlessDevice {
       const streamId = Number(frame.streamId);
       const stream = this.streams.get(streamId);
       if (stream)
-        this.handleStream(stream);
+        this.runStream(stream);
     }
   }
-  handleStream(stream) {
+  runStream(stream) {
+    this.handleStream(stream).catch((error) => {
+      this.respond(stream.streamId, 200, {
+        status: "failed",
+        error: { code: "MachineServer.Internal", message: errorText(error) }
+      });
+    });
+  }
+  async handleStream(stream) {
     this.streams.delete(stream.streamId);
     let payload = null;
     try {
@@ -2027,16 +2238,18 @@ class HeadlessDevice {
     const record = payload && typeof payload === "object" ? payload : {};
     let result;
     if (stream.path.startsWith("/v1/git/capture")) {
-      result = { repos: [] };
+      result = ok({ repos: [] });
     } else if (stream.path.startsWith("/v1/invocations")) {
       const handler = String(record.handler ?? "");
       const params = record.params && typeof record.params === "object" ? record.params : {};
-      result = machineResult(handler, params, this.worktreeBase);
+      result = await machineResult(handler, params, this.activeRoot ?? this.worktreeBase);
+      if (handler === "worktree_ensure" && result.status === "succeeded") {
+        const root = String(params.root ?? "");
+        if (root)
+          this.activeRoot = root;
+      }
     } else {
-      result = {
-        status: "failed",
-        error: { code: "MachineServer.Unavailable", message: `\u672A\u5B9E\u73B0\u7684\u8DEF\u5F84 ${stream.path}` }
-      };
+      result = fail("MachineServer.Unavailable", `\u672A\u5B9E\u73B0\u7684\u8DEF\u5F84 ${stream.path}`);
     }
     this.respond(stream.streamId, 200, result);
   }
@@ -2070,6 +2283,7 @@ class HeadlessDeviceRuntime {
   store;
   clock;
   logger;
+  deviceName;
   devices = new Map;
   inflight = new Map;
   constructor(options) {
@@ -2077,6 +2291,7 @@ class HeadlessDeviceRuntime {
     this.store = options.store;
     this.clock = options.clock;
     this.logger = options.logger;
+    this.deviceName = options.deviceName?.trim() || defaultDeviceName();
   }
   async ensure(session, signal) {
     const key = accountKey(session);
@@ -2112,6 +2327,17 @@ class HeadlessDeviceRuntime {
     let credential = await this.store.load(key);
     if (!credential || credential.orgId !== session.orgId) {
       credential = await this.pair(session, jwt, signal);
+    } else if (credential.name !== this.deviceName) {
+      try {
+        await this.app.renameDevice(jwt, session.orgId, credential.deviceId, this.deviceName, signal);
+        credential = { ...credential, name: this.deviceName };
+        await this.store.save(key, credential);
+      } catch (error) {
+        this.logger?.warn("capy device rename failed", {
+          deviceId: credential.deviceId,
+          message: errorText(error)
+        });
+      }
     }
     let device;
     try {
@@ -2162,7 +2388,7 @@ class HeadlessDeviceRuntime {
       arch: deviceArch2()
     }, signal);
     try {
-      await this.app.approveDeviceCode(jwt, session.orgId, start.userCode, HEADLESS_NAME, signal);
+      await this.app.approveDeviceCode(jwt, session.orgId, start.userCode, this.deviceName, signal);
     } catch (error) {
       const hint = start.verificationUrl ? `\uFF1B\u53EF\u5728\u6D4F\u89C8\u5668\u6253\u5F00 ${start.verificationUrl} \u624B\u52A8\u6279\u51C6` : "";
       throw new CapyError("device_pair_failed", `Capy \u8BBE\u5907\u7801\u81EA\u52A8\u6279\u51C6\u5931\u8D25\uFF1A${errorText(error)}${hint}`);
@@ -2181,7 +2407,7 @@ class HeadlessDeviceRuntime {
         const credential = {
           orgId: poll.enrolled.orgId || session.orgId,
           deviceId: poll.enrolled.deviceId,
-          name: poll.enrolled.name || HEADLESS_NAME,
+          name: this.deviceName,
           token: poll.enrolled.token
         };
         await this.store.save(accountKey(session), credential);

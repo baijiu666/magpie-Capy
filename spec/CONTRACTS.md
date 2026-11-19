@@ -258,12 +258,19 @@ Authorization: Bearer capyd_…
 
 | handler | params | result |
 |---|---|---|
+| `bash` | `{command, timeoutSeconds, ...}` | `{kind:"bash", stdout, stderr, exitCode, durationMs, timedOut, isError}` |
+| `bash_output` | `{operationId}` | `{kind:"not-running"}` |
+| `read` | `{path, offset?, limit?, maxChars?}` | `{kind:"read", content, offset, totalLines, isError:false}` |
+| `write` | `{path, content}` | `{kind:"write", path, bytes, isError:false}` |
+| `edit` | `{path, oldString, newString, replaceAll?}` | `{kind:"edit", path, replacements, isError:false}` |
+| `file_read` | `{path}` | `{kind:"read"|"missing", ...}` |
+| `file_write` | `{path, content, baseSha?}` | `{kind:"written"|"conflict", ...}` |
 | `worktree_ensure` | `{root, checkouts?, startFromOrigin?}` | `{root, created, checkouts: []}` |
 | `worktree_list` | `{roots?, activeRoots?, dirty?}` | `{kind:"worktree_list", entries: []}` |
 | `volume_landed` | `{mounts:[{mountPath,digest}]}` | `{kind:"volume_landed", mounts:[{mountPath,current:true}], landing:false, checkpoints:false, directories:[], unretained:[], handback:true}` |
 | `volume_probe` | `{mounts:[…]}` | `{mounts:[{mountPath,state:"current"}]}` |
 | `POST /v1/git/capture` | `{repos:[],baseRefs:["origin/HEAD"]}` | `{repos:[]}` |
-| 其他 | — | `{status:"failed", error:{code:"MachineServer.Unavailable", message:"…"}}` |
+| 浏览器/computer 等 | — | `{status:"failed", error:{code:"MachineServer.Unavailable", message:"…"}}` |
 
 ### 5.4 结果包装
 

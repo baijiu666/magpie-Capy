@@ -99,6 +99,7 @@ export interface CapyAppPort {
   organizations(jwt: string, signal?: AbortSignal): Promise<readonly Organization[]>;
   mintApiKey(jwt: string, orgId: string, name: string, signal?: AbortSignal): Promise<{ plaintext: string; keyId?: string }>;
   listDevices(jwt: string, orgId: string, signal?: AbortSignal): Promise<readonly DeviceInfo[]>;
+  renameDevice(jwt: string, orgId: string, deviceId: string, name: string, signal?: AbortSignal): Promise<void>;
   startDeviceCode(jwt: string, input: { hostname: string; os: string; arch: string }, signal?: AbortSignal): Promise<DeviceCodeStart>;
   approveDeviceCode(jwt: string, orgId: string, userCode: string, name: string, signal?: AbortSignal): Promise<void>;
   pollDeviceCode(jwt: string, deviceCode: string, signal?: AbortSignal): Promise<DeviceCodePoll>;

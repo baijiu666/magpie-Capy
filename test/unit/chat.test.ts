@@ -44,6 +44,7 @@ function fakeApp() {
     async organizations() { return [{ id: "org_1" }]; },
     async mintApiKey() { return { plaintext: "capy_key" }; },
     async listDevices() { return [device]; },
+    async renameDevice() {},
     async startDeviceCode() { throw new Error("unused"); },
     async approveDeviceCode() {},
     async pollDeviceCode() { throw new Error("unused"); },

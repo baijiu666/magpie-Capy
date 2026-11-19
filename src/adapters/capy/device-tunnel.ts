@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -25,6 +27,22 @@ function deviceOs(): string {
 
 function deviceArch(): string {
   return process.arch === "arm64" ? "arm64" : "x86_64";
+}
+
+/** 设备名优先用主机名（这台机器是 `baijiu`），没有就用系统用户名。 */
+export function defaultDeviceName(): string {
+  const override = String(process.env.MAGPIE_CAPY_DEVICE_NAME ?? "").trim();
+  if (override) return override.slice(0, 80);
+  let host = "";
+  try { host = os.hostname(); } catch {}
+  let user = "";
+  try { user = os.userInfo().username; } catch {}
+  if (!user) user = String(process.env.USERNAME ?? process.env.USER ?? "").trim();
+  const raw = host || user || "capy-headless";
+  return raw
+    .replace(/[^A-Za-z0-9._@-]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, 80) || "capy-headless";
 }
 
 function stateDir(): string {
@@ -130,11 +148,117 @@ function decodeDataFrame(bytes: Uint8Array): { streamId: number; body: Uint8Arra
   return { streamId: view.getUint32(0), body: bytes.subarray(4) };
 }
 
-function machineResult(handler: string, params: Record<string, unknown>, worktreeBase: string): {
-  readonly status: "succeeded" | "failed";
-  readonly result?: unknown;
-  readonly error?: { readonly code: string; readonly message: string };
-} {
+type MachineOutcome =
+  | { readonly status: "succeeded"; readonly result: unknown }
+  | { readonly status: "failed"; readonly error: { readonly code: string; readonly message: string } };
+
+function ok(result: unknown): MachineOutcome {
+  return { status: "succeeded", result };
+}
+
+function fail(code: string, message: string): MachineOutcome {
+  return { status: "failed", error: { code, message } };
+}
+
+function fileFailure(error: unknown): MachineOutcome {
+  const code = (error as { code?: unknown } | null)?.code;
+  const message = error instanceof Error ? error.message : String(error);
+  if (code === "ENOENT") return fail("MachineServer.FileError", `not-found: ${message}`);
+  if (code === "EISDIR") return fail("MachineServer.FileError", `is-directory: ${message}`);
+  if (code === "EACCES" || code === "EPERM") return fail("MachineServer.FileError", `permission-denied: ${message}`);
+  return fail("MachineServer.FileError", `other: ${message}`);
+}
+
+function resolveIn(cwd: string, raw: unknown): string {
+  const value = String(raw ?? "").trim();
+  if (!value) throw new Error("path is required");
+  return path.isAbsolute(value) ? path.normalize(value) : path.resolve(cwd, value);
+}
+
+function sha256(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+async function runBash(params: Record<string, unknown>, cwd: string): Promise<MachineOutcome> {
+  const command = String(params.command ?? "");
+  if (!command.trim()) return fail("MachineServer.Bash", "bash command is empty");
+  const timeoutSeconds = Math.max(1, Math.min(600, Number(params.timeoutSeconds) || 120));
+  const runCwd = path.resolve(cwd);
+  try { fs.mkdirSync(runCwd, { recursive: true }); } catch { /* best effort */ }
+
+  const shell = String(process.env.MAGPIE_CAPY_BASH ?? "").trim() || "bash";
+  const env = {
+    ...process.env,
+    PS1: "",
+    NO_COLOR: "1",
+    TERM: "dumb",
+    LANG: "C.UTF-8",
+    LC_ALL: "C.UTF-8",
+    PAGER: "cat",
+    GIT_PAGER: "cat",
+    GH_PAGER: "cat",
+    COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+  };
+  const startedAt = Date.now();
+  const maxChars = 4 * 1024 * 1024;
+
+  return await new Promise<MachineOutcome>((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(shell, ["-lc", command], { cwd: runCwd, env, windowsHide: true });
+    } catch (error) {
+      resolve(fail("MachineServer.Bash", `Failed to start bash: ${error instanceof Error ? error.message : String(error)}`));
+      return;
+    }
+    const append = (current: string, chunk: Buffer): string => {
+      if (current.length >= maxChars) return current;
+      return current + chunk.toString("utf8").slice(0, maxChars - current.length);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGKILL"); } catch {}
+      if (process.platform === "win32" && child.pid) {
+        try {
+          spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }).unref();
+        } catch {}
+      }
+    }, timeoutSeconds * 1000);
+    timer.unref?.();
+    child.stdout?.on("data", (chunk: Buffer) => { stdout = append(stdout, chunk); });
+    child.stderr?.on("data", (chunk: Buffer) => { stderr = append(stderr, chunk); });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(fail("MachineServer.Bash", `Failed to start bash: ${error.message}`));
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ok({
+        kind: "bash",
+        stdout,
+        stderr,
+        exitCode: typeof code === "number" ? code : -1,
+        durationMs: Date.now() - startedAt,
+        timedOut,
+        isError: timedOut,
+        ...(timedOut ? { landingNote: "Command timed out and was stopped." } : {}),
+      }));
+    });
+  });
+}
+
+export async function machineResult(
+  handler: string,
+  params: Record<string, unknown>,
+  worktreeBase: string,
+): Promise<MachineOutcome> {
   if (handler === "worktree_ensure") {
     const root = String(params.root ?? "");
     let created = false;
@@ -142,53 +266,122 @@ function machineResult(handler: string, params: Record<string, unknown>, worktre
       const base = path.resolve(worktreeBase);
       const resolved = path.resolve(root);
       if (resolved !== base && !resolved.startsWith(`${base}${path.sep}`)) {
-        return { status: "failed", error: { code: "MachineServer.Refused", message: "worktree root outside worktreeBase" } };
+        return fail("MachineServer.Refused", "worktree root outside worktreeBase");
       }
       created = !fs.existsSync(resolved);
       fs.mkdirSync(resolved, { recursive: true });
     }
-    return { status: "succeeded", result: { root, created, checkouts: [] } };
+    return ok({ root, created, checkouts: [] });
   }
   if (handler === "worktree_list") {
-    return { status: "succeeded", result: { kind: "worktree_list", entries: [] } };
+    return ok({ kind: "worktree_list", entries: [] });
   }
   if (handler === "volume_landed") {
     const mounts = Array.isArray(params.mounts) ? params.mounts : [];
-    return {
-      status: "succeeded",
-      result: {
-        kind: "volume_landed",
-        mounts: mounts.map((mount) => ({
-          mountPath: String((mount as Record<string, unknown>)?.mountPath ?? ""),
-          current: true,
-        })),
-        landing: false,
-        checkpoints: false,
-        directories: [],
-        unretained: [],
-        handback: true,
-      },
-    };
+    return ok({
+      kind: "volume_landed",
+      mounts: mounts.map((mount) => ({
+        mountPath: String((mount as Record<string, unknown>)?.mountPath ?? ""),
+        current: true,
+      })),
+      landing: false,
+      checkpoints: false,
+      directories: [],
+      unretained: [],
+      handback: true,
+    });
   }
   if (handler === "volume_probe") {
     const mounts = Array.isArray(params.mounts) ? params.mounts : [];
-    return {
-      status: "succeeded",
-      result: {
-        mounts: mounts.map((mount) => ({
-          mountPath: String((mount as Record<string, unknown>)?.mountPath ?? ""),
-          state: "current",
-        })),
-      },
-    };
+    return ok({
+      mounts: mounts.map((mount) => ({
+        mountPath: String((mount as Record<string, unknown>)?.mountPath ?? ""),
+        state: "current",
+      })),
+    });
   }
-  return {
-    status: "failed",
-    error: {
-      code: "MachineServer.Unavailable",
-      message: `无头设备未实现 ${handler || "unknown"}；终端/浏览器/写文件等工具不会执行。`,
-    },
-  };
+  if (handler === "bash") return await runBash(params, worktreeBase);
+  if (handler === "bash_output") return ok({ kind: "not-running" });
+  if (handler === "read") {
+    try {
+      const file = resolveIn(worktreeBase, params.path);
+      const text = fs.readFileSync(file, "utf8");
+      const offset = Math.max(1, Number(params.offset) || 1);
+      const limit = Math.max(1, Math.min(10_000, Number(params.limit) || 2_000));
+      const maxChars = Math.max(200, Math.min(100_000, Number(params.maxChars) || 20_000));
+      const all = text.split(/\r?\n/u);
+      const content = all
+        .slice(offset - 1, offset - 1 + limit)
+        .map((line) => line.length > maxChars ? `${line.slice(0, maxChars)}... (line truncated to ${maxChars} chars)` : line)
+        .join("\n");
+      return ok({ kind: "read", content, offset, totalLines: all.length, isError: false });
+    } catch (error) {
+      return fileFailure(error);
+    }
+  }
+  if (handler === "write") {
+    try {
+      const file = resolveIn(worktreeBase, params.path);
+      const content = String(params.content ?? "");
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, content, "utf8");
+      return ok({ kind: "write", path: file, bytes: Buffer.byteLength(content), isError: false });
+    } catch (error) {
+      return fileFailure(error);
+    }
+  }
+  if (handler === "edit") {
+    try {
+      const file = resolveIn(worktreeBase, params.path);
+      const oldString = String(params.oldString ?? "");
+      const newString = String(params.newString ?? "");
+      if (!oldString || oldString === newString) {
+        return fail("MachineServer.FileError", "oldString must be non-empty and differ from newString");
+      }
+      const text = fs.readFileSync(file, "utf8");
+      const count = text.split(oldString).length - 1;
+      if (count === 0) return fail("MachineServer.FileError", `The text was not found in ${String(params.path)}`);
+      if (count > 1 && params.replaceAll !== true) {
+        return fail("MachineServer.FileError", `Found ${count} occurrences; provide more context or replaceAll`);
+      }
+      const next = params.replaceAll === true ? text.split(oldString).join(newString) : text.replace(oldString, newString);
+      fs.writeFileSync(file, next, "utf8");
+      return ok({ kind: "edit", path: file, replacements: count, isError: false });
+    } catch (error) {
+      return fileFailure(error);
+    }
+  }
+  if (handler === "file_read") {
+    try {
+      const file = resolveIn(worktreeBase, params.path);
+      const text = fs.readFileSync(file, "utf8");
+      return ok({ kind: "read", path: file, content: { text }, sha: sha256(text), isError: false });
+    } catch (error) {
+      if ((error as { code?: unknown } | null)?.code === "ENOENT") return ok({ kind: "missing", isError: false });
+      return fileFailure(error);
+    }
+  }
+  if (handler === "file_write") {
+    try {
+      const file = resolveIn(worktreeBase, params.path);
+      const content = String(params.content ?? "");
+      let currentSha: string | null = null;
+      try { currentSha = sha256(fs.readFileSync(file, "utf8")); } catch {}
+      const baseSha = typeof params.baseSha === "string" ? params.baseSha : null;
+      if (baseSha !== null && currentSha !== baseSha) {
+        return ok({ kind: "conflict", currentSha, isError: false });
+      }
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, content, "utf8");
+      return ok({ kind: "written", sha: sha256(content), bytes: Buffer.byteLength(content), isError: false });
+    } catch (error) {
+      return fileFailure(error);
+    }
+  }
+  return fail(
+    "MachineServer.Unavailable",
+    `无头设备未实现 ${handler || "unknown"}；浏览器/computer 等工具不会执行。`,
+  );
 }
 
 class HeadlessDevice {
@@ -201,6 +394,7 @@ class HeadlessDevice {
   private readyResolve: (() => void) | null = null;
   private readyReject: ((error: Error) => void) | null = null;
   private readonly streams = new Map<number, StreamState>();
+  private activeRoot: string | null = null;
 
   constructor(options: {
     readonly credential: HeadlessCredential;
@@ -338,7 +532,7 @@ class HeadlessDevice {
     if (!stream) return;
     stream.body = Buffer.concat([stream.body, Buffer.from(frame.body)]);
     const length = Number(headerValue(stream.headers, "content-length") || 0);
-    if (!length || stream.body.length >= length) this.handleStream(stream);
+    if (!length || stream.body.length >= length) this.runStream(stream);
   }
 
   private onControl(text: string): void {
@@ -373,29 +567,39 @@ class HeadlessDevice {
     if (type === "close") {
       const streamId = Number(frame.streamId);
       const stream = this.streams.get(streamId);
-      if (stream) this.handleStream(stream);
+      if (stream) this.runStream(stream);
     }
   }
 
-  private handleStream(stream: StreamState): void {
+  private runStream(stream: StreamState): void {
+    void this.handleStream(stream).catch((error) => {
+      this.respond(stream.streamId, 200, {
+        status: "failed",
+        error: { code: "MachineServer.Internal", message: errorText(error) },
+      });
+    });
+  }
+
+  private async handleStream(stream: StreamState): Promise<void> {
     this.streams.delete(stream.streamId);
     let payload: unknown = null;
     try { payload = stream.body.length > 0 ? JSON.parse(stream.body.toString("utf8")) : null; } catch {}
     const record = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
-    let result: unknown;
+    let result: MachineOutcome;
     if (stream.path.startsWith("/v1/git/capture")) {
-      result = { repos: [] };
+      result = ok({ repos: [] });
     } else if (stream.path.startsWith("/v1/invocations")) {
       const handler = String(record.handler ?? "");
       const params = record.params && typeof record.params === "object"
         ? record.params as Record<string, unknown>
         : {};
-      result = machineResult(handler, params, this.worktreeBase);
+      result = await machineResult(handler, params, this.activeRoot ?? this.worktreeBase);
+      if (handler === "worktree_ensure" && result.status === "succeeded") {
+        const root = String(params.root ?? "");
+        if (root) this.activeRoot = root;
+      }
     } else {
-      result = {
-        status: "failed",
-        error: { code: "MachineServer.Unavailable", message: `未实现的路径 ${stream.path}` },
-      };
+      result = fail("MachineServer.Unavailable", `未实现的路径 ${stream.path}`);
     }
     this.respond(stream.streamId, 200, result);
   }
@@ -434,6 +638,7 @@ export class HeadlessDeviceRuntime implements DeviceRuntimePort {
   private readonly store: SecretStorePort;
   private readonly clock: ClockPort;
   private readonly logger: LoggerPort | undefined;
+  private readonly deviceName: string;
   private readonly devices = new Map<string, HeadlessDevice>();
   private readonly inflight = new Map<string, Promise<DeviceInfo>>();
 
@@ -442,11 +647,13 @@ export class HeadlessDeviceRuntime implements DeviceRuntimePort {
     readonly store: SecretStorePort;
     readonly clock: ClockPort;
     readonly logger?: LoggerPort;
+    readonly deviceName?: string;
   }) {
     this.app = options.app;
     this.store = options.store;
     this.clock = options.clock;
     this.logger = options.logger;
+    this.deviceName = options.deviceName?.trim() || defaultDeviceName();
   }
 
   async ensure(session: AccountSession, signal?: AbortSignal): Promise<DeviceInfo> {
@@ -484,6 +691,17 @@ export class HeadlessDeviceRuntime implements DeviceRuntimePort {
     let credential = await this.store.load(key);
     if (!credential || credential.orgId !== session.orgId) {
       credential = await this.pair(session, jwt, signal);
+    } else if (credential.name !== this.deviceName) {
+      try {
+        await this.app.renameDevice(jwt, session.orgId, credential.deviceId, this.deviceName, signal);
+        credential = { ...credential, name: this.deviceName };
+        await this.store.save(key, credential);
+      } catch (error) {
+        this.logger?.warn("capy device rename failed", {
+          deviceId: credential.deviceId,
+          message: errorText(error),
+        });
+      }
     }
 
     let device: HeadlessDevice;
@@ -538,7 +756,7 @@ export class HeadlessDeviceRuntime implements DeviceRuntimePort {
       arch: deviceArch(),
     }, signal);
     try {
-      await this.app.approveDeviceCode(jwt, session.orgId, start.userCode, HEADLESS_NAME, signal);
+      await this.app.approveDeviceCode(jwt, session.orgId, start.userCode, this.deviceName, signal);
     } catch (error) {
       const hint = start.verificationUrl ? `；可在浏览器打开 ${start.verificationUrl} 手动批准` : "";
       throw new CapyError("device_pair_failed", `Capy 设备码自动批准失败：${errorText(error)}${hint}`);
@@ -556,7 +774,7 @@ export class HeadlessDeviceRuntime implements DeviceRuntimePort {
         const credential: HeadlessCredential = {
           orgId: poll.enrolled.orgId || session.orgId,
           deviceId: poll.enrolled.deviceId,
-          name: poll.enrolled.name || HEADLESS_NAME,
+          name: this.deviceName,
           token: poll.enrolled.token,
         };
         await this.store.save(accountKey(session), credential);

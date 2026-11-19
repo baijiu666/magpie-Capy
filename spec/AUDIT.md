@@ -45,7 +45,7 @@
 | 值 | 位置 | 性质 |
 |---|---|---|
 | `capy` provider id | `src/entry/plugin.ts` | 直接替代旧插件；`MAGPIE_CAPY_PROVIDER_ID` 可覆盖 |
-| `magpie-headless` 设备名 | 设备配对/文档 | 我们自己起的名字 |
+| 设备名 = `os.hostname()`（如 `baijiu`） | 设备配对 | 插件策略；`MAGPIE_CAPY_DEVICE_NAME` 可覆盖 |
 | `magpie-plugin` API key 名 | `src/application/login.ts` | 服务端只存 hint，同名可重复创建 |
 | `JWT_TTL_MS = 50_000` | `src/application/chat.ts` | Clerk JWT 60s 的安全余量 |
 | catalog cache 10 分钟 | `src/application/catalog.ts` | 插件缓存策略 |
@@ -124,7 +124,7 @@
 
 | 代码 | 现状 |
 |---|---|
-| 完整 machine server | 只有 worktree/volume/git capture；终端/浏览器/写文件返回 `MachineServer.Unavailable` |
+| 完整 machine server | 已有 bash/read/write/edit + worktree/volume/git；浏览器/computer 仍返回 `MachineServer.Unavailable` |
 | 原生 OpenAI tools | Capy agent 没有原生 tools；只有 PromptToolBridge，模型可能拒绝/忽略 |
 | 浏览器登录的自动化 e2e | 代码已实现；测试只验证启动/取消，完整登录需要人工 |
 | 设备/线程删除、旧设备清理 | 没有接；避免破坏性操作 |
@@ -158,7 +158,7 @@ entry 的 `_internal` / `DEFAULT_MODEL_ID` / `PUBLIC_API_BASE` 导出。
 
 ### 5.5 仍属计划、不是死代码
 
-`src/ports/**` 是冻结接口；`src/application/**` 的部分能力（完整 machine server、
+`src/ports/**` 是冻结接口；`src/application/**` 的部分能力（浏览器/computer、
 原生 tools）还没有实现。它们不是“删掉就行”的死代码，而是明确的后续工作。
 
 ---
@@ -206,7 +206,7 @@ V0 已经能作为 Magpie 插件运行：
 
 1. 浏览器登录的完整人工回归（代码已实现，当前只 smoke 了启动/取消）
 2. 原生 tools（Capy agent 无此能力，只能 PromptToolBridge）
-3. 完整 machine server（终端/浏览器/写文件）
+3. 浏览器 / computer use（bash / 文件 / 工作区已实现）
 4. 自动化 e2e / 发布流程
 
 ---

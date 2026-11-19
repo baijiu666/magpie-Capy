@@ -2,7 +2,7 @@
 
 把 [Capy](https://capy.ai) 接进 [magpie](https://usemagpie.ai) 的 provider 插件。
 
-- **纯无头**：自动注册 `magpie-headless` 设备，走 Capy device tunnel；运行时不需要 Capy 桌面端。
+- **纯无头**：自动注册设备（默认用主机名，这台机器是 `baijiu`），走 Capy device tunnel；运行时不需要 Capy 桌面端。
 - **登录**：本机 Capy 客户端导入（只读登录态）/ 浏览器登录（Google / GitHub / Passkey / 邮箱）。
 - **对话**：OpenAI 兼容 `/chat/completions`，原生 SSE，流式/非流式。
 - **模型**：动态目录 + 静态兜底；3 个免费模型。
@@ -71,9 +71,31 @@ domain: 纯类型/错误/事件，不依赖 I/O
   需要把代理切到支持地区的节点，或改用 `particle/particle-1`。
 - ADS 模型还必须带 `ads-models` 客户端能力位；插件只对这两个模型自动加。
 
+## 无头设备与工具
+
+设备名默认取 `os.hostname()`（这台机器是 `baijiu`）；可用 `MAGPIE_CAPY_DEVICE_NAME` 覆盖。
+已有设备会通过 `PATCH /app/orgs/{org}/devices/{id}` 自动重命名，不需要重新配对。
+Capy 设置里如果还留着旧的 `magpie-headless` 设备，可以在设备页面手动删除；插件只使用当前主机名这台。
+
+machine RPC 已实现：
+
+| 能力 | handler |
+|---|---|
+| 执行命令 | `bash` / `bash_output` |
+| 读写文件 | `read` / `write` / `edit` / `file_read` / `file_write` |
+| 工作区 | `worktree_ensure` / `worktree_list` |
+| 卷 | `volume_landed` / `volume_probe` |
+| Git | `POST /v1/git/capture` |
+
+> [!warning]
+> `bash` 会在**当前 Windows 用户权限**下执行 Capy agent 发来的命令，和 Capy 桌面端的行为一致。
+> 只安装可信插件、只登录可信账号；不要把这个设备 token 交给别人。
+
+浏览器 / computer use 仍未实现。
+
 ## 边界
 
-- 无头设备只实现最小 machine RPC；终端/浏览器/写文件工具不可用。
+- 无头设备实现 bash / 文件 / 工作区；浏览器 / computer use 不可用。
 - 免费 ADS 模型（GLM-5.3-Flash / DeepSeek V4.1 Flash）只允许这些出口 IP：
   US / CA / UK / AU / NZ / IE。插件会自动读取 `MAGPIE_CAPY_PROXY`、`HTTPS_PROXY`
   和 Windows 系统代理，并在日志里打印 `proxy_enabled`；出口不在支持地区会返回
