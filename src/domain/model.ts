@@ -41,6 +41,12 @@ const FREE_MODEL_IDS: ReadonlySet<string> = new Set([
   "deepseek/deepseek-v4.1-flash-ads",
 ]);
 
+/** App 内免费广告模型：建线程必须带 `ads-models` 客户端能力位。 */
+const ADS_MODEL_IDS: ReadonlySet<string> = new Set([
+  "zai/glm-5.3-flash-ads",
+  "deepseek/deepseek-v4.1-flash-ads",
+]);
+
 /** 公共 /models 不返回的两个 App 内免费广告模型。 */
 export const EXTRA_FREE_MODELS: readonly RawModel[] = [
   {
@@ -57,6 +63,10 @@ export const EXTRA_FREE_MODELS: readonly RawModel[] = [
 
 export function isFreeModel(id: string): boolean {
   return FREE_MODEL_IDS.has(String(id).trim());
+}
+
+export function isAdsModel(id: string): boolean {
+  return ADS_MODEL_IDS.has(String(id).trim());
 }
 
 function vendorOf(id: string): string {

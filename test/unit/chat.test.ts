@@ -58,6 +58,7 @@ function fakeApp() {
     async getJam(_jwt, _org, id) {
       return { id, status: "idle", ask: null };
     },
+    async getJamEvents() { return []; },
     async interruptJam() { interrupted += 1; },
   };
   return { app, calls, interrupted: () => interrupted };
@@ -125,6 +126,58 @@ test("ChatUseCase：ensure → createJam → SSE → 事件", async () => {
   expect(calls[0]?.deviceId).toBe(device.id);
   expect(calls[0]?.modelId).toBe("particle/particle-1");
   expect(calls[0]?.clientKey).toBe(calls[0]?.requestId);
+});
+
+test("ChatUseCase：ADS 模型建线程带 ads 能力位", async () => {
+  const { app, calls } = fakeApp();
+  const useCase = new ChatUseCase({
+    app,
+    publicApi: fakePublic([]),
+    device: new DeviceUseCase(fakeRuntime()),
+    ids: ids(),
+    clock,
+    tools: new PromptToolBridge(),
+    toolsEnabled: false,
+  });
+  for await (const _event of useCase.stream(session, {
+    ...request,
+    model: "zai/glm-5.3-flash-ads",
+  })) { /* drain */ }
+  expect(calls[0]?.ads).toBe(true);
+});
+
+test("ChatUseCase：线程 failed 且无文本时返回 jam error，而不是空完成", async () => {
+  const base = fakeApp();
+  const app: CapyAppPort = {
+    ...base.app,
+    async getJam(_jwt, _org, id) {
+      return { id, status: "failed", ask: null };
+    },
+    async getJamEvents() {
+      return [{
+        id: "event_1",
+        kind: "error",
+        payload: { code: "region_unsupported", message: "only US/CA/UK" },
+      }];
+    },
+  };
+  const useCase = new ChatUseCase({
+    app,
+    publicApi: fakePublic([]),
+    device: new DeviceUseCase(fakeRuntime()),
+    ids: ids(),
+    clock,
+    tools: new PromptToolBridge(),
+    toolsEnabled: false,
+  });
+  const events = [];
+  for await (const event of useCase.stream(session, request)) events.push(event);
+  expect(events).toHaveLength(1);
+  expect(events[0]?.type).toBe("error");
+  if (events[0]?.type === "error") {
+    expect(events[0].error.kind).toBe("region_unsupported");
+    expect(events[0].error.status).toBe(403);
+  }
 });
 
 test("ChatUseCase：cancel 调 interrupt", async () => {

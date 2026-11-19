@@ -59,6 +59,8 @@ export interface CreateJamInput {
   readonly deviceId: string;
   readonly files?: readonly JamFile[];
   readonly promptVariant?: "minimal";
+  /** 免费广告模型：服务端要求 `ads-models` 客户端能力位。 */
+  readonly ads?: boolean;
 }
 
 export interface JamAsk {
@@ -80,6 +82,17 @@ export interface JamDetail {
   readonly ask?: JamAsk | null;
 }
 
+export interface JamEvent {
+  readonly id: string;
+  readonly kind: string;
+  readonly state?: string;
+  readonly payload?: {
+    readonly code?: string;
+    readonly message?: string;
+    readonly retryable?: boolean;
+  };
+}
+
 export interface CapyAppPort {
   sessionJwt(clerk: ClerkSession, signal?: AbortSignal): Promise<string>;
   me(jwt: string, signal?: AbortSignal): Promise<AccountProfile>;
@@ -91,6 +104,7 @@ export interface CapyAppPort {
   pollDeviceCode(jwt: string, deviceCode: string, signal?: AbortSignal): Promise<DeviceCodePoll>;
   createJam(jwt: string, orgId: string, input: CreateJamInput, signal?: AbortSignal): Promise<JamCreated>;
   getJam(jwt: string, orgId: string, jamId: string, signal?: AbortSignal): Promise<JamDetail>;
+  getJamEvents(jwt: string, orgId: string, jamId: string, signal?: AbortSignal): Promise<readonly JamEvent[]>;
   interruptJam(jwt: string, orgId: string, jamId: string, signal?: AbortSignal): Promise<void>;
 }
 

@@ -11,6 +11,7 @@ import type {
   DeviceInfo,
   JamCreated,
   JamDetail,
+  JamEvent,
   Organization,
 } from "../../ports/capy-app.ts";
 import { requestJson } from "../platform/http.ts";
@@ -228,7 +229,7 @@ export class CapyAppClient implements CapyAppPort {
         ...(input.promptVariant ? { promptVariant: input.promptVariant } : {}),
       }),
       ...(signal ? { signal } : {}),
-    });
+    }, input.ads ? { "x-capy-client-features": "message-edit,visual,ads-models" } : {});
     const record = body as Record<string, unknown>;
     const id = String(record.id ?? "").trim();
     if (!id) throw new CapyError("upstream_error", "Capy 创建线程没有返回 id");
@@ -265,6 +266,41 @@ export class CapyAppClient implements CapyAppPort {
     };
   }
 
+  async getJamEvents(
+    jwt: string,
+    orgId: string,
+    jamId: string,
+    signal?: AbortSignal,
+  ): Promise<readonly JamEvent[]> {
+    const body = await this.json(
+      jwt,
+      `/orgs/${encodeURIComponent(orgId)}/jams/${encodeURIComponent(jamId)}/events?limit=50`,
+      { method: "GET", ...(signal ? { signal } : {}) },
+    );
+    const record = body as { items?: unknown };
+    const items = Array.isArray(record.items) ? record.items : [];
+    return items.flatMap((item): JamEvent[] => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+      const value = item as Record<string, unknown>;
+      const id = typeof value.id === "string" ? value.id : "";
+      const kind = typeof value.kind === "string" ? value.kind : "";
+      if (!id || !kind) return [];
+      const payload = value.payload && typeof value.payload === "object" && !Array.isArray(value.payload)
+        ? value.payload as Record<string, unknown>
+        : {};
+      return [{
+        id,
+        kind,
+        ...(typeof value.state === "string" ? { state: value.state } : {}),
+        payload: {
+          ...(typeof payload.code === "string" ? { code: payload.code } : {}),
+          ...(typeof payload.message === "string" ? { message: payload.message } : {}),
+          ...(typeof payload.retryable === "boolean" ? { retryable: payload.retryable } : {}),
+        },
+      }];
+    });
+  }
+
   async interruptJam(jwt: string, orgId: string, jamId: string, signal?: AbortSignal): Promise<void> {
     await this.json(jwt, `/orgs/${encodeURIComponent(orgId)}/jams/${encodeURIComponent(jamId)}/interrupt`, {
       method: "POST",
@@ -277,13 +313,14 @@ export class CapyAppClient implements CapyAppPort {
     jwt: string,
     route: string,
     init: RequestInit & { signal?: AbortSignal },
+    extraHeaders: Record<string, string> = {},
   ): Promise<unknown> {
     const { response, body, text } = await requestJson(
       this.fetchImpl,
       `${CAPY_APP}${route}`,
       {
         ...init,
-        headers: clientHeaders(jwt, ""),
+        headers: clientHeaders(jwt, "", extraHeaders),
       },
       30_000,
     );

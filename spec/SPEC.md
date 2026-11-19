@@ -111,6 +111,8 @@
 
 - **FR-3.1 动态目录**：`GET /api/v1/models`；失败时用静态快照。
 - **FR-3.2 免费模型**：`particle/particle-1`、`zai/glm-5.3-flash-ads`、`deepseek/deepseek-v4.1-flash-ads` → `free:true`。
+  后两个是 ADS 模型：建线程必须带 `ads-models` 能力位，且**出口 IP 仅限 US / CA / UK / AU / NZ / IE**；
+  其它地区返回 403 `region_unsupported`（Capy 服务端判定，插件不能绕过）。
 - **FR-3.3 免费优先排序**：免费模型排最前（宿主 `/v1/models` 截断时仍可见）。
 - **FR-3.4 模型解析**：精确 id → `capy/` 前缀剥离 → 短名 → 展示名；未知 → 404。
 - **FR-3.5 能力描述**：Capy `/models` **不返回** image/pdf/tool 能力。插件按通道能力标记：

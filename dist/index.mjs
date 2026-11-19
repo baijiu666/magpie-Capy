@@ -1045,7 +1045,7 @@ class CapyAppClient {
         ...input.promptVariant ? { promptVariant: input.promptVariant } : {}
       }),
       ...signal ? { signal } : {}
-    });
+    }, input.ads ? { "x-capy-client-features": "message-edit,visual,ads-models" } : {});
     const record = body;
     const id = String(record.id ?? "").trim();
     if (!id)
@@ -1074,6 +1074,31 @@ class CapyAppClient {
       ...record.ask === null || record.ask && typeof record.ask === "object" ? { ask: record.ask } : {}
     };
   }
+  async getJamEvents(jwt, orgId, jamId, signal) {
+    const body = await this.json(jwt, `/orgs/${encodeURIComponent(orgId)}/jams/${encodeURIComponent(jamId)}/events?limit=50`, { method: "GET", ...signal ? { signal } : {} });
+    const record = body;
+    const items = Array.isArray(record.items) ? record.items : [];
+    return items.flatMap((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item))
+        return [];
+      const value = item;
+      const id = typeof value.id === "string" ? value.id : "";
+      const kind = typeof value.kind === "string" ? value.kind : "";
+      if (!id || !kind)
+        return [];
+      const payload = value.payload && typeof value.payload === "object" && !Array.isArray(value.payload) ? value.payload : {};
+      return [{
+        id,
+        kind,
+        ...typeof value.state === "string" ? { state: value.state } : {},
+        payload: {
+          ...typeof payload.code === "string" ? { code: payload.code } : {},
+          ...typeof payload.message === "string" ? { message: payload.message } : {},
+          ...typeof payload.retryable === "boolean" ? { retryable: payload.retryable } : {}
+        }
+      }];
+    });
+  }
   async interruptJam(jwt, orgId, jamId, signal) {
     await this.json(jwt, `/orgs/${encodeURIComponent(orgId)}/jams/${encodeURIComponent(jamId)}/interrupt`, {
       method: "POST",
@@ -1081,10 +1106,10 @@ class CapyAppClient {
       ...signal ? { signal } : {}
     });
   }
-  async json(jwt, route, init) {
+  async json(jwt, route, init, extraHeaders = {}) {
     const { response, body, text } = await requestJson(this.fetchImpl, `${CAPY_APP}${route}`, {
       ...init,
-      headers: clientHeaders(jwt, "")
+      headers: clientHeaders(jwt, "", extraHeaders)
     }, 30000);
     if (!response.ok)
       throw mapUpstream(response.status, body, text.slice(0, 300));
@@ -2970,6 +2995,10 @@ var FREE_MODEL_IDS = new Set([
   "zai/glm-5.3-flash-ads",
   "deepseek/deepseek-v4.1-flash-ads"
 ]);
+var ADS_MODEL_IDS = new Set([
+  "zai/glm-5.3-flash-ads",
+  "deepseek/deepseek-v4.1-flash-ads"
+]);
 var EXTRA_FREE_MODELS = [
   {
     id: "zai/glm-5.3-flash-ads",
@@ -2984,6 +3013,9 @@ var EXTRA_FREE_MODELS = [
 ];
 function isFreeModel(id) {
   return FREE_MODEL_IDS.has(String(id).trim());
+}
+function isAdsModel(id) {
+  return ADS_MODEL_IDS.has(String(id).trim());
 }
 function vendorOf(id) {
   const slash = id.indexOf("/");
@@ -3232,6 +3264,9 @@ class PublicSseNormalizer {
   get text() {
     return this.finalText || this.lastText;
   }
+  get hasError() {
+    return this.errored;
+  }
   onAssistant(payload) {
     if (!payload)
       return [];
@@ -3326,7 +3361,8 @@ class ChatUseCase {
         deviceId: device.id,
         ...run.reasoningMode ? { reasoningMode: run.reasoningMode } : {},
         ...run.files && run.files.length > 0 ? { files: run.files } : {},
-        ...promptVariant ? { promptVariant } : {}
+        ...promptVariant ? { promptVariant } : {},
+        ...isAdsModel(request.model) ? { ads: true } : {}
       }, run.signal);
     };
     let thread;
@@ -3354,6 +3390,13 @@ class ChatUseCase {
         for (const event of normalizer.push(frame))
           yield event;
       }
+      if (!normalizer.text && !normalizer.hasError) {
+        const failure = await this.jamFailure(jwt, session.orgId, thread.id, run.signal);
+        if (failure) {
+          yield { type: "error", error: failure };
+          return;
+        }
+      }
       for (const event of normalizer.finish())
         yield event;
     } catch (error) {
@@ -3368,6 +3411,23 @@ class ChatUseCase {
         error: new CapyError("upstream_unavailable", errorMessage(error), { cause: error })
       };
     }
+  }
+  async jamFailure(jwt, orgId, jamId, signal) {
+    const detail = await this.options.app.getJam(jwt, orgId, jamId, signal).catch(() => null);
+    const blocked = askError(detail);
+    if (blocked)
+      return blocked;
+    if (detail?.status !== "failed")
+      return null;
+    const events = await this.options.app.getJamEvents(jwt, orgId, jamId, signal).catch(() => []);
+    for (const event of [...events].reverse()) {
+      if (event.kind !== "error")
+        continue;
+      const code = event.payload?.code ?? "";
+      const message = event.payload?.message ?? "Capy \u7EBF\u7A0B\u5931\u8D25";
+      return mapJamError(code, message);
+    }
+    return new CapyError("upstream_error", "Capy \u7EBF\u7A0B\u5931\u8D25\uFF0C\u4F46\u6CA1\u6709\u8FD4\u56DE\u9519\u8BEF\u8BE6\u60C5");
   }
   async cancel(session, jamId) {
     try {
@@ -3397,6 +3457,21 @@ function askError(detail) {
     return new CapyError("upstream_unavailable", ask.text || "Capy \u7EBF\u7A0B\u9700\u8981\u4EBA\u5DE5/\u684C\u9762\u7AEF\u64CD\u4F5C");
   }
   return new CapyError("upstream_error", ask.text || `Capy \u7EBF\u7A0B\u963B\u585E\uFF1A${ask.kind}`);
+}
+function mapJamError(code, message) {
+  if (code === "region_unsupported")
+    return new CapyError("region_unsupported", message, { detail: code });
+  if (code === "unauthorized")
+    return new CapyError("sign_in_required", message, { detail: code });
+  if (code === "forbidden")
+    return new CapyError("upstream_error", message, { status: 403, detail: code });
+  if (code === "rate_limited")
+    return new CapyError("rate_limited", message, { detail: code });
+  if (/quota|credit/iu.test(code))
+    return new CapyError("insufficient_quota", message, { detail: code });
+  if (/ModelSelection/iu.test(code))
+    return new CapyError("model_not_found", message, { detail: code });
+  return new CapyError("upstream_error", message, { detail: code });
 }
 function isAbort(error) {
   return error instanceof DOMException && error.name === "AbortError";
@@ -3993,7 +4068,8 @@ function toMagpieModel(model, providerId, toolsEnabled) {
   return {
     id: model.id,
     providerID: providerId,
-    name: model.name,
+    name: isAdsModel(model.id) ? `${model.name} \xB7 US/CA/UK/AU/NZ/IE` : model.name,
+    ...isAdsModel(model.id) ? { description: "Free with ads \u2014 only US / CA / UK / AU / NZ / IE egress IP" } : {},
     free: model.free,
     tool_call: toolsEnabled,
     attachment: true,
@@ -4052,6 +4128,14 @@ async function CapyNextPlugin(_ctx = {}, options = {}) {
   const clock = new SystemClock;
   const ids = new SystemIds;
   const logger = new ConsoleLogger("capy");
+  if (proxyUrl) {
+    let host = "configured";
+    try {
+      const parsed = new URL(proxyUrl);
+      host = `${parsed.hostname}:${parsed.port || "default"}`;
+    } catch {}
+    logger.event("proxy_enabled", { proxy: host });
+  }
   const cache = new MemoryCache(() => clock.now());
   const app = new CapyAppClient(fetchImpl);
   const publicApi = new CapyPublicClient(fetchImpl);

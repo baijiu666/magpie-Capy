@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import {
   describeModel,
   freeFirst,
+  isAdsModel,
   isFreeModel,
   mergeCatalog,
   reasoningModeOf,
@@ -18,6 +19,9 @@ const models = [
 
 test("免费模型：集合 + 排最前", () => {
   expect(isFreeModel("particle/particle-1")).toBe(true);
+  expect(isAdsModel("zai/glm-5.3-flash-ads")).toBe(true);
+  expect(isAdsModel("deepseek/deepseek-v4.1-flash-ads")).toBe(true);
+  expect(isAdsModel("particle/particle-1")).toBe(false);
   expect(isFreeModel("openai/gpt-6.2-astra")).toBe(false);
   const ids = freeFirst(models).map((model) => model.id);
   expect(ids.slice(0, 3).every((id) => isFreeModel(id))).toBe(true);

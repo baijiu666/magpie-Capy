@@ -24,6 +24,7 @@ import {
   describeModel,
   EXTRA_FREE_MODELS,
   freeFirst,
+  isAdsModel,
   mergeCatalog,
   reasoningModeOf,
   resolveModelId,
@@ -56,6 +57,7 @@ interface MagpieModel {
   readonly id: string;
   readonly providerID: string;
   readonly name: string;
+  readonly description?: string;
   readonly free: boolean;
   readonly tool_call: boolean;
   readonly attachment: boolean;
@@ -84,7 +86,10 @@ function toMagpieModel(model: ModelDescriptor, providerId: string, toolsEnabled:
   return {
     id: model.id,
     providerID: providerId,
-    name: model.name,
+    name: isAdsModel(model.id) ? `${model.name} · US/CA/UK/AU/NZ/IE` : model.name,
+    ...(isAdsModel(model.id)
+      ? { description: "Free with ads — only US / CA / UK / AU / NZ / IE egress IP" }
+      : {}),
     free: model.free,
     tool_call: toolsEnabled,
     attachment: true,
@@ -157,6 +162,11 @@ export default async function CapyNextPlugin(
   const clock = new SystemClock();
   const ids = new SystemIds();
   const logger = new ConsoleLogger("capy");
+  if (proxyUrl) {
+    let host = "configured";
+    try { const parsed = new URL(proxyUrl); host = `${parsed.hostname}:${parsed.port || "default"}`; } catch {}
+    logger.event("proxy_enabled", { proxy: host });
+  }
   const cache = new MemoryCache(() => clock.now());
   const app = new CapyAppClient(fetchImpl);
   const publicApi = new CapyPublicClient(fetchImpl);

@@ -55,10 +55,29 @@ domain: 纯类型/错误/事件，不依赖 I/O
 | `src/protocol/` | SSE / OpenAI 编解码 |
 | `spec/` | 行为、架构、协议、决策、审计 |
 
+## 免费模型与地区
+
+| 模型 | 免费方式 | 地区 |
+|---|---|---|
+| `particle/particle-1` | 免费、无广告 | 无地区限制 |
+| `zai/glm-5.3-flash-ads` | App 内广告免费 | **仅 US / CA / UK / AU / NZ / IE 出口 IP** |
+| `deepseek/deepseek-v4.1-flash-ads` | App 内广告免费 | **仅 US / CA / UK / AU / NZ / IE 出口 IP** |
+
+两个 ADS 模型是 Capy 服务端按**出口 IP** 判定的，不是请求头能绕过的：
+
+- 插件会读取 `MAGPIE_CAPY_PROXY`、`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` 或 Windows 系统代理。
+- 启动日志会打印 `proxy_enabled`（只打印 host:port，不打印凭据），可以先确认代理是否生效。
+- 出口不在支持地区时，插件返回 `region_unsupported`，并在错误里附带 Capy 的原文；
+  需要把代理切到支持地区的节点，或改用 `particle/particle-1`。
+- ADS 模型还必须带 `ads-models` 客户端能力位；插件只对这两个模型自动加。
+
 ## 边界
 
 - 无头设备只实现最小 machine RPC；终端/浏览器/写文件工具不可用。
-- 免费广告模型仍受 Capy 地区/代理限制。
+- 免费 ADS 模型（GLM-5.3-Flash / DeepSeek V4.1 Flash）只允许这些出口 IP：
+  US / CA / UK / AU / NZ / IE。插件会自动读取 `MAGPIE_CAPY_PROXY`、`HTTPS_PROXY`
+  和 Windows 系统代理，并在日志里打印 `proxy_enabled`；出口不在支持地区会返回
+  `region_unsupported`，这是 Capy 服务端限制，插件无法绕过。
 - 没有原生 OpenAI tools；只有 `PromptToolBridge` 提示词约定，Capy agent 可能忽略。
 - 没有数据库/队列：插件是请求作用域 + 本地 device token。
 - 同一 Magpie 里只安装一份 `capy` 插件。

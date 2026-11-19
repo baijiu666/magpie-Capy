@@ -22,6 +22,7 @@ function fakeApp(overrides: Partial<CapyAppPort> = {}): CapyAppPort {
     async pollDeviceCode() { throw new Error("unused"); },
     async createJam() { throw new Error("unused"); },
     async getJam() { throw new Error("unused"); },
+    async getJamEvents() { return []; },
     async interruptJam() {},
   } as CapyAppPort;
   return Object.assign(base, overrides, {

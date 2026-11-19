@@ -157,6 +157,9 @@ GET /api/v1/models
 - 建线程时省略 `model`，Capy 自己走默认链，并在响应的 `modelDefault` 里报告用了哪个；
   显式指定不能运行的模型会 `ModelSelection.Rejected`，不会自动回退。
 - 所以插件不能把 `particle/particle-1` 说成“Capy 的默认模型”；它只是插件的免费兜底选择。
+- ADS 模型（`*-ads`）建线程必须带 `x-capy-client-features: …,ads-models`；
+  服务端还按出口 IP 放行 **US / CA / UK / AU / NZ / IE**，其它地区返回
+  `region_unsupported`。不是浏览器 UA/时区能绕过的。
 
 `reasoningMode` 的协议枚举：
 

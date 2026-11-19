@@ -2,6 +2,7 @@ import type { AccountSession } from "../domain/account.ts";
 import { accountKey } from "../domain/account.ts";
 import type { ChatEvent, ChatRequest } from "../domain/chat.ts";
 import { buildPrompt } from "../domain/chat.ts";
+import { isAdsModel } from "../domain/model.ts";
 import { CapyError } from "../domain/errors.ts";
 import type { JamCreated, JamDetail, JamFile } from "../ports/capy-app.ts";
 import type { CapyAppPort } from "../ports/capy-app.ts";
@@ -69,6 +70,7 @@ export class ChatUseCase {
         ...(run.reasoningMode ? { reasoningMode: run.reasoningMode } : {}),
         ...(run.files && run.files.length > 0 ? { files: run.files } : {}),
         ...(promptVariant ? { promptVariant } : {}),
+        ...(isAdsModel(request.model) ? { ads: true } : {}),
       }, run.signal);
     };
 
@@ -102,6 +104,13 @@ export class ChatUseCase {
       for await (const frame of this.options.publicApi.streamThread(session.accessToken, thread.id, run.signal)) {
         for (const event of normalizer.push(frame)) yield event;
       }
+      if (!normalizer.text && !normalizer.hasError) {
+        const failure = await this.jamFailure(jwt, session.orgId, thread.id, run.signal);
+        if (failure) {
+          yield { type: "error", error: failure };
+          return;
+        }
+      }
       for (const event of normalizer.finish()) yield event;
     } catch (error) {
       if (error instanceof CapyError) {
@@ -114,6 +123,26 @@ export class ChatUseCase {
         error: new CapyError("upstream_unavailable", errorMessage(error), { cause: error }),
       };
     }
+  }
+
+  private async jamFailure(
+    jwt: string,
+    orgId: string,
+    jamId: string,
+    signal?: AbortSignal,
+  ): Promise<CapyError | null> {
+    const detail = await this.options.app.getJam(jwt, orgId, jamId, signal).catch(() => null);
+    const blocked = askError(detail);
+    if (blocked) return blocked;
+    if (detail?.status !== "failed") return null;
+    const events = await this.options.app.getJamEvents(jwt, orgId, jamId, signal).catch(() => []);
+    for (const event of [...events].reverse()) {
+      if (event.kind !== "error") continue;
+      const code = event.payload?.code ?? "";
+      const message = event.payload?.message ?? "Capy 线程失败";
+      return mapJamError(code, message);
+    }
+    return new CapyError("upstream_error", "Capy 线程失败，但没有返回错误详情");
   }
 
   async cancel(session: AccountSession, jamId: string): Promise<void> {
@@ -146,6 +175,16 @@ function askError(detail: JamDetail | null): CapyError | null {
     return new CapyError("upstream_unavailable", ask.text || "Capy 线程需要人工/桌面端操作");
   }
   return new CapyError("upstream_error", ask.text || `Capy 线程阻塞：${ask.kind}`);
+}
+
+function mapJamError(code: string, message: string): CapyError {
+  if (code === "region_unsupported") return new CapyError("region_unsupported", message, { detail: code });
+  if (code === "unauthorized") return new CapyError("sign_in_required", message, { detail: code });
+  if (code === "forbidden") return new CapyError("upstream_error", message, { status: 403, detail: code });
+  if (code === "rate_limited") return new CapyError("rate_limited", message, { detail: code });
+  if (/quota|credit/iu.test(code)) return new CapyError("insufficient_quota", message, { detail: code });
+  if (/ModelSelection/iu.test(code)) return new CapyError("model_not_found", message, { detail: code });
+  return new CapyError("upstream_error", message, { detail: code });
 }
 
 function isAbort(error: unknown): boolean {

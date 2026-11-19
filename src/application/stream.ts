@@ -66,6 +66,10 @@ export class PublicSseNormalizer {
     return this.finalText || this.lastText;
   }
 
+  get hasError(): boolean {
+    return this.errored;
+  }
+
   private onAssistant(payload: AssistantPayload | null): ChatEvent[] {
     if (!payload) return [];
     const callId = typeof payload.callId === "string" ? payload.callId : "";
