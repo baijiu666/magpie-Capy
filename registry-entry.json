@@ -1,0 +1,11 @@
+{
+  "package": "Capy",
+  "name": "magpie-Capy",
+  "providers": [
+    "capy"
+  ],
+  "summary": {
+    "en": "magpie-Capy: Capy (capy.ai) via desktop worktrees and native SSE; browser/passkey/email/GitHub login, local import, 3 free models, image attachments.",
+    "zh": "magpie-Capy：Capy（capy.ai）本机设备线程 + 原生 SSE；浏览器/Passkey/邮箱/GitHub 登录、本机导入、3 个免费模型、图片附件。"
+  }
+}
