@@ -41,6 +41,8 @@ const auth = {
   metadata: { orgId: "org_1", deviceId: "device_1", clientId: "c".repeat(32), userId: "user_1" },
 }
 
+const fakeHeadless = async () => ({ deviceId: "device_1", name: "baijiu" })
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } })
 }
@@ -258,30 +260,26 @@ test("streamThread 把 region_unsupported 归一成 403", async () => {
   )
 })
 
-test("createDeviceThread 如果上游回云端机器，明确报错（不假装本机）", async () => {
+test("createDeviceThread 如果上游回云端机器，明确报错（不假装无头设备）", async () => {
   const fetchImpl = async () => json({
     id: "jam_1",
     primaryMachine: { kind: "cloud" },
   })
   await assert.rejects(
     createDeviceThread(fetchImpl, { jwt: "j", orgId: "org_1", deviceId: "device_1", message: "x" }),
-    (error) => error.status === 503 && /本机设备/u.test(error.message),
+    (error) => error.status === 503 && /无头设备/u.test(error.message),
   )
 })
 
-test("resolveDeviceSession 选中已连接设备；没有设备时 503", async () => {
-  const session = await resolveDeviceSession(appRouter(), auth)
+test("resolveDeviceSession 用无头设备；headless 未启用时 503", async () => {
+  const session = await resolveDeviceSession(appRouter(), auth, { headless: fakeHeadless })
   assert.equal(session.orgId, "org_1")
   assert.equal(session.device.id, "device_1")
+  assert.equal(session.device.name, "baijiu")
 
-  const noDevice = async (url) => {
-    if (url.endsWith("/v1/client/sessions/sess_1/tokens")) return json({ jwt: sessionJwt })
-    if (url.endsWith("/app/orgs/org_1/devices")) return json([])
-    return json({}, 404)
-  }
   await assert.rejects(
-    resolveDeviceSession(noDevice, auth),
-    (error) => error.status === 503 && /桌面端/u.test(error.message),
+    resolveDeviceSession(appRouter(), auth),
+    (error) => error.status === 503 && /无头设备未启用/u.test(error.message),
   )
 })
 
@@ -304,7 +302,7 @@ test("answerFromOutline 取最后一条有 answer 的轮次", () => {
 })
 
 test("runThread：换票 → 建本机线程 → 等回答", async () => {
-  const result = await runThread(appRouter(), auth, { prompt: "ping", modelId: "particle/particle-1" })
+  const result = await runThread(appRouter(), auth, { prompt: "ping", modelId: "particle/particle-1", headless: fakeHeadless })
   assert.equal(result.text, "pong")
   assert.equal(result.thread.primaryMachine.kind, "device")
 })
@@ -337,6 +335,7 @@ test("runThread：minimal 提示词 403 时自动降级并重试", async () => {
   let fellBack = false
   const result = await runThread(fetchImpl, auth, {
     prompt: "ping",
+    headless: fakeHeadless,
     modelId: "particle/particle-1",
     promptVariant: "minimal",
     onVariantFallback: () => { fellBack = true },
@@ -350,6 +349,7 @@ test("chatCompletions（非流式）返回 OpenAI JSON", async () => {
   const response = await chatCompletions({
     fetchImpl: appRouter(),
     auth,
+    headless: fakeHeadless,
     body: { messages: [{ role: "user", content: "ping" }] },
     stream: false,
     modelId: "particle/particle-1",
@@ -363,6 +363,7 @@ test("chatCompletions（流式）发 role + content + stop + [DONE]", async () =
   const response = await chatCompletions({
     fetchImpl: appRouter(),
     auth,
+    headless: fakeHeadless,
     body: { messages: [{ role: "user", content: "ping" }] },
     stream: true,
     modelId: "particle/particle-1",
@@ -407,6 +408,7 @@ test("chatCompletions 余额不足时抛 402（非流式）", async () => {
     chatCompletions({
       fetchImpl: appRouter({ credits: true }),
       auth,
+      headless: fakeHeadless,
       body: { messages: [{ role: "user", content: "ping" }] },
       stream: false,
       modelId: "particle/particle-1",

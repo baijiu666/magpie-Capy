@@ -1,25 +1,57 @@
-# Capy 桌面端设备隧道 / 机器协议（0.9.2 取证）
+# Capy 无头设备 / device tunnel 取证（0.9.2）
 
-> 目的：回答「为什么必须连接 Capy 桌面端」以及「能不能做一个无头设备」。
+> 目的：记录「不启动 Capy 桌面端，怎么跑 Capy 设备线程」的协议。
 > 取证对象：`Capy-0.9.2-x64.exe` 解包后的 `out/main/main.js`（Electron 主进程）。
 > 本文只记录协议形状，不包含任何凭据。
 
-## 0. 一句话结论
+## 0. 结论
 
-**桌面端不是登录器，它是 Capy 的「执行设备」：** 线程绑到 device 后，Worktree、终端、文件、
-Git、浏览器、Drive/checkpoint 都由这台设备上的 machine server 执行。免费模型不消耗 credits，
-但必须有一个在线 device；浏览器登录只提供身份 + API Key，不提供算力。
+Capy 桌面端不是登录器，它是一台 **device**：Worktree、终端、文件、Git、浏览器、Drive/checkpoint
+都由设备的 machine server 执行。插件 0.5.0 用**无头设备**替代桌面端：
 
-**关窗口 ≠ 退出。** 桌面端关闭主窗口会隐藏到托盘，device tunnel 保持连接，线程仍然可用。
-实测：关窗口后进程仍在、`/devices` 仍 `connected:true`、网关对话仍返回 `pong`。
+1. 浏览器登录拿 Clerk 会话；
+2. 自动走设备码配对，注册 `magpie-headless`，拿 `capyd_…` token；
+3. 连 device tunnel；
+4. 实现最小 machine server（够文本/图片对话）；
+5. device token 用 Windows DPAPI 加密存在本机。
 
-## 1. 设备隧道
+**不需要 Capy 桌面端、不需要 `%APPDATA%\Capy` 的登录凭据。**
+
+## 1. 设备码配对（无需桌面端）
+
+```http
+POST /app/devices/code
+{ "hostname": "…", "os": "win32", "arch": "x86_64" }
+→ { userCode, deviceCode, verificationUrl, expiresInSeconds, pollIntervalSeconds }
+
+POST /app/orgs/{orgId}/devices/code/approve
+{ "userCode": "…", "name": "magpie-headless" }
+→ { "status": "approved" }
+
+POST /app/devices/code/poll
+{ "deviceCode": "…" }
+→ {
+    "status": "approved",
+    "orgName": "…",
+    "enrolled": {
+      "orgId": "org_…",
+      "device": { "id": "device_…", "name": "magpie-headless", … },
+      "token": "capyd_…"
+    }
+  }
+```
+
+`code/approve` 需要 Clerk 会话（`Authorization: Bearer <azp JWT>` + `Origin: https://capy.ai`）。
+插件自动 approve，不需要用户打开浏览器批准页。
+
+## 2. Device tunnel
 
 ```
 wss://device-tunnel-production.cloud.capy.ai/tunnel
+Authorization: Bearer capyd_…
 ```
 
-### 1.1 客户端 → 服务端：hello
+### 2.1 hello
 
 ```json
 {
@@ -30,14 +62,11 @@ wss://device-tunnel-production.cloud.capy.ai/tunnel
   "os": "win32",
   "workspaces": [],
   "worktreeBase": "C:\\Users\\…\\.capy\\worktrees",
-  "clientVersion": "desktop 0.9.2",
-  "drive": true,
-  "driveEngineVersion": 4,
-  "hardware": { "…": "…" }
+  "clientVersion": "magpie-headless 0.1"
 }
 ```
 
-### 1.2 服务端 → 客户端：session-config
+### 2.2 session-config → ready
 
 ```json
 {
@@ -47,74 +76,66 @@ wss://device-tunnel-production.cloud.capy.ai/tunnel
   "transferSecret": "…",
   "pushReports": true,
   "presignedParts": true,
-  "driveEngine": true
+  "driveEngine": false
 }
 ```
 
-客户端随后回：
+客户端回：
 
 ```json
+{ "type": "workspaces-changed", "workspaces": [] }
 { "type": "ready" }
 ```
 
-### 1.3 其他帧
+服务端随后把设备标记为 `connected: true`（`GET /app/orgs/{orgId}/devices`）。
 
-- `workspaces-changed`
-- `push-report`
-- `preference-changed`
-- `checkpoint-ready` / `checkpoint-acknowledged` / `checkpoint-mint`
-- machine server 的 `invoke` / `pty` / `transfer`
+## 3. Machine server RPC（HTTP-over-WebSocket）
 
-## 2. Machine server（真正的工作量）
+服务端帧：
 
-`session-config.endpoint` + `bearer` 建立 machine server 会话，然后由它处理：
+```json
+{ "type": "open", "streamId": 2, "kind": "invoke", "method": "POST",
+  "path": "/v1/invocations?wait=25000", "headers": { … } }
+```
 
-| 域 | 内容 |
+随后一个二进制帧：`streamId(4B BE) + body`，再：
+
+```json
+{ "type": "close", "streamId": 2 }
+```
+
+设备回：
+
+```json
+{ "type": "response", "streamId": 2, "status": 200,
+  "headers": { "content-type": "application/json", "content-length": "…" } }
+```
+
+再发二进制 `streamId + response body`，最后 `{ "type": "close", "streamId": 2 }`。
+
+### 3.1 已实现的最小 handler
+
+| handler | 返回 |
 |---|---|
-| Workspace / Worktree | 创建、链接、worktree base、root、branches |
-| Terminal / PTY | `invoke`、`pty`、streamId、输出流 |
-| File / Transfer | 读写、上传下载、presigned parts、大小限制 |
-| Git | status/log/diff、shadow repo、checkpoint |
-| Browser | Chromium runtime、CDP、截图、visual check |
-| Drive | 队列、mount、operation、checkpoint 同步 |
-| Checkpoint | snapshot、manifest、ack、mint |
+| `worktree_ensure` | `{root, created, checkouts: []}`，并创建目录 |
+| `worktree_list` | `{kind:"worktree_list", entries: []}` |
+| `volume_landed` | mounts current |
+| `volume_probe` | mounts current |
+| `POST /v1/git/capture` | `{repos: []}` |
+| 其他（terminal/browser/write/transfer） | `{status:"failed", error:{code:"MachineServer.Unavailable"}}` |
 
-这就是为什么「纯 Node 无头设备」不是一个小的兼容层：**隧道握手很简单，machine server 的
-RPC 面很大**。云端 agent 一旦决定用工具（读文件、跑终端、Git、浏览器），这些调用都会落到
-machine server。
+## 4. 实测
 
-## 3. 本机凭据
+- 无 Capy 桌面端、无 `device-credentials.json`；
+- 设备码配对 → `magpie-headless` `connected:true`；
+- 建线程 `primaryMachine.kind:"device"`；
+- `particle-1` 回答 `pong` **8.9 秒**；`done` 11.5 秒。
+
+## 5. 本机状态
 
 | 文件 | 内容 |
 |---|---|
-| `%APPDATA%\Capy\device-credentials.json` | `{version, backend?, orgs:{orgId:{userId, deviceId, ciphertext}}}`；`ciphertext` 是 device custody（加密） |
-| `%APPDATA%\Capy\device-ids.json` | 已知 deviceId |
-| `%APPDATA%\Capy\session-credential.json` | Clerk client JWT（DPAPI + AES-GCM） |
-| `Local State` | Chromium `os_crypt.encrypted_key`（DPAPI） |
+| `%LOCALAPPDATA%\magpie-capy\headless-device.json` | `{version, orgId, deviceId, name, tokenCiphertext}`；token 用 Windows DPAPI 加密 |
+| `~/.capy/worktrees/jam_*` | 无头设备创建的 Worktree |
 
-桌面端用 `IIe(credentialsPath)` 读 custody，隧道客户端 `xEe()` 拿 `custody + identity` 建连。
-custody 的具体解密/换 token 还在主进程闭包里，未完整提取；要复刻无头设备，这是第一个要补的洞。
-
-## 4. 可行的替代方案
-
-1. **官方托盘模式（推荐，已验证）**
-   - 打开一次 Capy 桌面端；
-   - 关闭主窗口（X）→ 隐藏到托盘，进程与 device tunnel 保留；
-   - 插件照常使用，不需要窗口。
-2. **开机自启 + 托盘**
-   - 在 Capy 设置里开启 launch at login / 保持运行；
-   - 设备长期在线，插件无感。
-3. **纯无头设备（未完成，工作量大）**
-   - 已拿到 tunnel hello / session-config / ready 形状；
-   - 还缺：custody 解密与 tunnel token、machine server 的 RPC 实现；
-   - 适合只做纯文本、且能容忍工具不可用的场景；需要单独立项验证服务端是否接受 stub。
-
-## 5. 证据位置
-
-- `out/main/main.js`：
-  - `wss://device-tunnel-production.cloud.capy.ai/tunnel`
-  - `Lre/Ure/Mre` schema：`hello` / `session-config` / `ready`
-  - `vIe(...)`：device daemon 启动
-  - `IIe(...)`：device-credentials custody reader
-  - `capy/machine-server/*`：machine server 各子系统
-  - 主窗口 `close` handler：`preventDefault` → `hide()` → 托盘通知
+旧版桌面端路径（`device-credentials.json` / `Local State` / `session-credential.json`）已不再读取。

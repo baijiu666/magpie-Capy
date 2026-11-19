@@ -5,11 +5,9 @@ import {
   completeLogin,
   encodeRefresh,
   ensureProject,
-  listDevices,
   mintApiKey,
   mintSessionJwt,
   parseRefresh,
-  pickDevice,
   refreshCredential,
   validateApiKey,
 } from "../src/auth.mjs"
@@ -66,7 +64,7 @@ test("mintSessionJwt 没有 azp 时报 401（不能用它调 /app）", async () 
   )
 })
 
-test("completeLogin：换票 → 读账号 → 选设备 → 签 API key → 校验（不建项目）", async () => {
+test("completeLogin：换票 → 读账号 → 签 API key → 校验（不建项目、不绑定设备）", async () => {
   const calls = []
   const fetchImpl = router([
     [/^POST https:\/\/clerk\.capy\.ai\/v1\/client\/sessions\/sess_1\/tokens$/u, () => {
@@ -80,13 +78,6 @@ test("completeLogin：换票 → 读账号 → 选设备 → 签 API key → 校
     [/^GET https:\/\/api\.capy\.ai\/app\/organizations$/u, () => {
       calls.push("orgs")
       return json([{ id: "org_1" }])
-    }],
-    [/^GET https:\/\/api\.capy\.ai\/app\/orgs\/org_1\/devices$/u, () => {
-      calls.push("devices")
-      return json([
-        { id: "device_other", name: "other", connected: false },
-        { id: "device_1", name: "baijiu", connected: true },
-      ])
     }],
     [/^POST https:\/\/api\.capy\.ai\/app\/orgs\/org_1\/api-keys$/u, () => {
       calls.push("mintKey")
@@ -109,26 +100,17 @@ test("completeLogin：换票 → 读账号 → 选设备 → 签 API key → 校
   assert.equal(account.accountId, "a@b.c")
   assert.equal(account.uid, "user_1")
   assert.equal(account.metadata.orgId, "org_1")
-  assert.equal(account.metadata.deviceId, "device_1")
-  assert.equal(account.metadata.deviceName, "baijiu")
+  assert.equal(account.metadata.deviceId, undefined)
+  assert.equal(account.metadata.deviceName, undefined)
   assert.equal(account.metadata.projectId, undefined)
   assert.match(account.metadata.clientId, /^[0-9a-f]{32}$/u)
   const refresh = parseRefresh(account.refresh)
   assert.equal(refresh.clientJwt, "client.jwt.x")
   assert.equal(refresh.orgId, "org_1")
-  assert.equal(refresh.deviceId, "device_1")
+  assert.equal(refresh.deviceId, "")
   assert.equal(refresh.clientId, account.metadata.clientId)
   assert.ok(account.expires > Date.now())
-  assert.deepEqual(calls, ["mint", "me", "orgs", "devices", "mintKey", "models"])
-})
-
-test("listDevices / pickDevice：只选 connected，优先指定 id", async () => {
-  const fetchImpl = async () => json([{ id: "a", connected: true }, { id: "b", connected: true }])
-  const devices = await listDevices(fetchImpl, "jwt", "org_1")
-  assert.equal(devices.length, 2)
-  assert.equal(pickDevice(devices, "b").id, "b")
-  assert.equal(pickDevice(devices, "missing").id, "a")
-  assert.equal(pickDevice([{ id: "off", connected: false }]), null)
+  assert.deepEqual(calls, ["mint", "me", "orgs", "mintKey", "models"])
 })
 
 test("ensureProject 优先复用已有 Magpie 项目", async () => {

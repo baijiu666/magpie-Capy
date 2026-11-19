@@ -96,8 +96,10 @@ function fetchForTests({ credits = false } = {}) {
   }
 }
 
+const fakeHeadless = async () => ({ deviceId: "device_1", name: "baijiu" })
+
 test("config 声明 provider + 64 个静态模型", async () => {
-  const plugin = await CapyAuthPlugin({}, { proxy: false, fetch: fetchForTests() })
+  const plugin = await CapyAuthPlugin({}, { proxy: false, headless: fakeHeadless, fetch: fetchForTests() })
   const cfg = {}
   await plugin.config(cfg)
   assert.equal(cfg.provider.capy.name, "Capy")
@@ -106,34 +108,19 @@ test("config 声明 provider + 64 个静态模型", async () => {
   assert.equal(Object.keys(cfg.provider.capy.models).length, 64)
 })
 
-test("auth.methods 只有两条：本机导入 + 浏览器登录", async () => {
-  const plugin = await CapyAuthPlugin({}, { proxy: false, fetch: fetchForTests() })
+test("auth.methods 只有一条：浏览器登录", async () => {
+  const plugin = await CapyAuthPlugin({}, { proxy: false, headless: fakeHeadless, fetch: fetchForTests() })
   assert.equal(plugin.auth.provider, "capy")
-  assert.equal(plugin.auth.methods.length, 2)
-  assert.match(plugin.auth.methods[0].label, /本机/u)
-  assert.match(plugin.auth.methods[1].label, /浏览器/u)
+  assert.equal(plugin.auth.methods.length, 1)
+  assert.match(plugin.auth.methods[0].label, /浏览器/u)
   assert.equal(typeof plugin.auth.refresh, "function")
   assert.equal(typeof plugin.auth.loader, "function")
   assert.equal(typeof plugin.auth.usage, "function")
   assert.equal(plugin.auth.checkin, undefined)
 })
 
-test("本机导入的 authorize 立即返回（不在 authorize 里等用户/网络）", async () => {
-  const plugin = await CapyAuthPlugin({}, { proxy: false,
-    fetch: fetchForTests(),
-    readLocal: () => new Promise(() => {}),
-  })
-  const started = Date.now()
-  const value = await plugin.auth.methods[0].authorize()
-  // 本地文件 + DPAPI 可能占几百毫秒，但绝不能等用户；2 秒是宽松上限。
-  assert.ok(Date.now() - started < 2000)
-  assert.equal(value.opened, true)
-  assert.equal(value.method, "auto")
-  assert.equal(typeof value.callback, "function")
-})
-
 test("loader：GET /models 返回 OpenAI 形状", async () => {
-  const plugin = await CapyAuthPlugin({}, { proxy: false, fetch: fetchForTests() })
+  const plugin = await CapyAuthPlugin({}, { proxy: false, headless: fakeHeadless, fetch: fetchForTests() })
   const loader = await plugin.auth.loader(async () => fakeAuth)
   const response = await loader.fetch("https://api.capy.ai/api/v1/models", { method: "GET" })
   assert.equal(response.status, 200)
@@ -143,7 +130,7 @@ test("loader：GET /models 返回 OpenAI 形状", async () => {
 })
 
 test("loader：/chat/completions（非流式）返回 assistant 文本", async () => {
-  const plugin = await CapyAuthPlugin({}, { proxy: false, fetch: fetchForTests() })
+  const plugin = await CapyAuthPlugin({}, { proxy: false, headless: fakeHeadless, fetch: fetchForTests() })
   const loader = await plugin.auth.loader(async () => fakeAuth)
   const response = await loader.fetch("https://api.capy.ai/api/v1/chat/completions", {
     method: "POST",
@@ -162,7 +149,7 @@ test("loader：/chat/completions（非流式）返回 assistant 文本", async (
 })
 
 test("loader：本机设备线程被 credits 拦住时 402 + insufficient_quota（非流式）", async () => {
-  const plugin = await CapyAuthPlugin({}, { proxy: false, fetch: fetchForTests({ credits: true }) })
+  const plugin = await CapyAuthPlugin({}, { proxy: false, headless: fakeHeadless, fetch: fetchForTests({ credits: true }) })
   const loader = await plugin.auth.loader(async () => fakeAuth)
   const response = await loader.fetch("https://api.capy.ai/api/v1/chat/completions", {
     method: "POST",
@@ -179,7 +166,7 @@ test("loader：本机设备线程被 credits 拦住时 402 + insufficient_quota�
 })
 
 test("loader：未知端点 501，未知模型 404", async () => {
-  const plugin = await CapyAuthPlugin({}, { proxy: false, fetch: fetchForTests() })
+  const plugin = await CapyAuthPlugin({}, { proxy: false, headless: fakeHeadless, fetch: fetchForTests() })
   const loader = await plugin.auth.loader(async () => fakeAuth)
 
   const missing = await loader.fetch("https://api.capy.ai/api/v1/embeddings", { method: "POST", body: "{}" })
@@ -200,7 +187,7 @@ test("loader：未知端点 501，未知模型 404", async () => {
 })
 
 test("usage 钩子：无余额 → used=100 的余额窗口", async () => {
-  const plugin = await CapyAuthPlugin({}, { proxy: false, fetch: fetchForTests() })
+  const plugin = await CapyAuthPlugin({}, { proxy: false, headless: fakeHeadless, fetch: fetchForTests() })
   const usage = await plugin.auth.usage(async () => fakeAuth)
   assert.equal(usage.windows[0].name, "余额")
   assert.equal(usage.windows[0].used, 100)
@@ -208,13 +195,13 @@ test("usage 钩子：无余额 → used=100 的余额窗口", async () => {
 })
 
 test("provider.models：有登录态时返回实时目录", async () => {
-  const plugin = await CapyAuthPlugin({}, { proxy: false, fetch: fetchForTests() })
+  const plugin = await CapyAuthPlugin({}, { proxy: false, headless: fakeHeadless, fetch: fetchForTests() })
   const models = await plugin.provider.models({}, { auth: fakeAuth })
   assert.equal(Object.keys(models).length, 4)
   assert.equal(models["openai/gpt-5.5"].providerID, "capy")
 })
 
-test("loginErrorText 对 401 / 本机导入错误给中文文案", () => {
+test("loginErrorText 对 401 / 通用错误给中文文案", () => {
   assert.match(_internal.loginErrorText({ status: 401 }), /重新登录/u)
-  assert.match(_internal.loginErrorText(new Error("没有找到本机 Capy")), /没有找到本机 Capy/u)
+  assert.match(_internal.loginErrorText(new Error("没有找到 Chromium 浏览器")), /没有找到 Chromium 浏览器/u)
 })

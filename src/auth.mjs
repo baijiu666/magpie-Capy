@@ -1,8 +1,7 @@
 // 登录 / 续期：把 Capy 的 Clerk 会话换成长期可用的组织级 API key。
 //
-// 两条登录路径最终都汇聚到这里：
-//   ① 本机导入：src/local.mjs 读出 clientJwt + sessionId + orgId
-//   ② 浏览器登录：src/browser.mjs 从 CDP 读 __client Cookie + sessionId + orgId（可能已顺手 mint key）
+// 登录只有一条路径：src/browser.mjs 从 CDP 读 __client Cookie + sessionId + orgId
+// （可能已顺手 mint key）。无头设备在首次使用时用同一个 Clerk 会话自动注册。
 //
 // 关键（2026-11-19 实测）：
 //   · Clerk 的 session JWT 只有在 **Origin + __client Cookie** 认证路径下才带
@@ -129,7 +128,7 @@ export async function mintSessionJwt(fetchImpl, { clientJwt, sessionId, signal }
   )
   if (!response.ok) {
     throw upstreamError(
-      `Capy 会话换票失败（HTTP ${response.status}）。请重新登录 Capy 桌面端/网页端。`,
+      `Capy 会话换票失败（HTTP ${response.status}）。请重新登录 Capy（浏览器登录）。`,
       401,
       { code: CODES.signInRequired, detail: text.slice(0, 200) },
     )
@@ -141,7 +140,7 @@ export async function mintSessionJwt(fetchImpl, { clientJwt, sessionId, signal }
   }
   if (claims.azp !== BASE) {
     throw upstreamError(
-      "Capy 会话换票没有拿到 azp（浏览器/桌面端的登录态可能不完整），请重新登录",
+      "Capy 会话换票没有拿到 azp（浏览器登录态可能不完整），请重新登录",
       401,
       { code: CODES.signInRequired, detail: `azp=${claims.azp ?? "missing"}` },
     )
@@ -165,24 +164,6 @@ export async function listProjects(fetchImpl, jwt, orgId, { signal } = {}) {
   })
   return (Array.isArray(body) ? body : Array.isArray(body?.items) ? body.items : [])
     .filter((item) => item && item.deleted !== true)
-}
-
-export async function listDevices(fetchImpl, jwt, orgId, { signal } = {}) {
-  const body = await appJson(fetchImpl, jwt, `/orgs/${encodeURIComponent(orgId)}/devices`, {
-    method: "GET",
-    signal,
-  })
-  return Array.isArray(body) ? body : Array.isArray(body?.items) ? body.items : []
-}
-
-/** 选一台已连接的本机设备；优先指定的 deviceId。 */
-export function pickDevice(devices, preferredId = "") {
-  const list = Array.isArray(devices) ? devices : []
-  const wanted = String(preferredId ?? "").trim()
-  const connected = list.filter((item) => item && item.connected === true)
-  return connected.find((item) => item.id === wanted)
-    || connected[0]
-    || null
 }
 
 export async function createProject(fetchImpl, jwt, orgId, { name = PROJECT_NAME, code = PROJECT_CODE, signal } = {}) {
@@ -266,7 +247,7 @@ export async function validateApiKey(fetchImpl, apiKey, { signal } = {}) {
 }
 
 /**
- * 把一份 Capy 登录态（本机导入或浏览器登录）变成 magpie 可保存的账号记录。
+ * 把一份 Capy 浏览器登录态变成 magpie 可保存的账号记录。
  *
  * @param {object} cred
  * @param {string} cred.clientJwt
@@ -303,12 +284,7 @@ export async function completeLogin(fetchImpl, cred, { signal, expiresMs = 7 * 2
     })
   }
 
-  // 插件默认用「本机设备线程」跑，不需要项目；这里顺便记住一台已连接设备。
-  // 没有连接设备也允许登录（模型/额度仍可用），chat 时会给出明确提示。
-  const device = pickDevice(
-    await listDevices(fetchImpl, jwt, orgId, { signal }).catch(() => []),
-    cred.deviceId || "",
-  )
+  // 不再绑定 Capy 桌面端设备；headless 设备在首次使用时自动注册。
   const projectId = String(cred.projectId || "").trim()
   const clientId = String(cred.clientId || "").trim() || newClientId()
 
@@ -328,8 +304,8 @@ export async function completeLogin(fetchImpl, cred, { signal, expiresMs = 7 * 2
   }
 
   const userId = String(me?.id || cred.userId || "").trim()
-  const deviceId = String(device?.id || cred.deviceId || "").trim()
-  const deviceName = String(device?.name || "").trim()
+  const deviceId = String(cred.deviceId || "").trim()
+  const deviceName = ""
   const refresh = encodeRefresh({
     clientJwt: cred.clientJwt,
     sessionId: cred.sessionId,
@@ -365,66 +341,41 @@ export async function completeLogin(fetchImpl, cred, { signal, expiresMs = 7 * 2
 }
 
 /**
- * 续期：API key 长期有效，但可能被吊销；Clerk 会话也可能被桌面端轮换。
- *
- * forceSession=true 用于「API key 还能用，但 mintSessionJwt 401」：这时不能只看
- * API key，必须重新读本机 Capy 登录态，把 stale 的 Clerk 会话换掉。
- * 本机导入不可用（非 Windows / 未安装桌面端）时，退回保存的 Clerk 会话。
- *
+ * 续期：API key 长期有效，但可能被吊销。先校验；失效就用保存的 Clerk 会话重新签。
+ * 不再依赖 Capy 桌面端；Clerk 会话失效时直接要求重新浏览器登录。
  * 返回的字段会合并进 magpie 的账号记录。
  */
-export async function refreshCredential(fetchImpl, auth, { signal, readLocal, forceSession = false } = {}) {
+export async function refreshCredential(fetchImpl, auth, { signal } = {}) {
   const cred = parseRefresh(auth?.refresh)
   const current = apiKeyOf(auth)
 
-  // 先判断现有 key 还能不能用：能复用就复用；已经 401 就不要再把它带进
-  // completeLogin（否则 completeLogin 校验失败会直接 502，而不是签一把新的）。
   let keyToReuse = current
   if (current) {
     const check = await validateApiKey(fetchImpl, current, { signal })
     if (check.ok) {
-      if (!forceSession) {
-        return {
-          access: current,
-          expires: Date.now() + 7 * 24 * 3600_000,
-        }
+      return {
+        access: current,
+        expires: Date.now() + 7 * 24 * 3600_000,
       }
-      keyToReuse = current
-    } else if (check.status === 401) {
-      keyToReuse = ""
-    } else if (!forceSession) {
+    }
+    if (check.status !== 401) {
       // 网络抖动：保持原样，交给宿主 30 秒后重试。
       return undefined
     }
+    keyToReuse = ""
   }
-
-  let local = null
-  if (typeof readLocal === "function") {
-    try { local = await readLocal() } catch {}
-  }
-
-  const base = local?.clientJwt && local?.sessionId
-    ? {
-        ...cred,
-        ...local,
-        orgId: local.orgId || cred?.orgId || "",
-        deviceId: local.deviceId || cred?.deviceId || "",
-        userId: local.userId || cred?.userId || "",
-        clientId: cred?.clientId || local.clientId || "",
-      }
-    : cred
-  if (!base?.clientJwt || !base?.sessionId) {
+  if (!cred) {
     throw Object.assign(new Error("Capy 登录已失效，请重新登录"), { signIn: "expired" })
   }
 
   try {
     // 带着现有 API key 走 completeLogin：key 还有效就复用，不会每次续期都新建一把。
     const renewed = await completeLogin(fetchImpl, {
-      ...base,
-      deviceId: base.deviceId || auth?.metadata?.deviceId || "",
-      projectId: base.projectId || auth?.metadata?.projectId || "",
-      orgId: base.orgId || auth?.metadata?.orgId || "",
-      clientId: base.clientId || auth?.metadata?.clientId || "",
+      ...cred,
+      deviceId: cred.deviceId || auth?.metadata?.deviceId || "",
+      projectId: cred.projectId || auth?.metadata?.projectId || "",
+      orgId: cred.orgId || auth?.metadata?.orgId || "",
+      clientId: cred.clientId || auth?.metadata?.clientId || "",
       apiKey: keyToReuse || undefined,
       source: auth?.metadata?.source || "refresh",
     }, { signal })
@@ -434,7 +385,6 @@ export async function refreshCredential(fetchImpl, auth, { signal, readLocal, fo
     if (isAuthFailure(error)) {
       throw Object.assign(new Error("Capy 登录已失效，请重新登录"), { signIn: "expired" })
     }
-    if (forceSession) throw error
     return undefined
   }
 }

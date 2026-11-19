@@ -1,7 +1,8 @@
 // magpie 插件：Capy（https://capy.ai，Scrapybara 的云端 coding agent）
 //
-// 上游是 Capy 的**公共 API**（https://api.capy.ai/api/v1），不是 OpenAI 兼容网关：
-//   · 登录：浏览器登录 / 本机 Capy 客户端导入；两者最终都换成一个组织级 API key（capy_…）
+// 上游是 Capy 的 App + 公共 API，不依赖 Capy 桌面端：
+//   · 登录：浏览器登录 → Clerk 会话 + 组织级 API Key（capy_…）
+//   · 设备：首次使用自动走设备码配对，注册 magpie-headless，连 device tunnel
 //   · 对话：POST /threads 新建线程 → GET /threads/{id}/stream?until=run（SSE）
 //   · 目录：GET /models；额度：GET /usage + /usage/balance
 //
@@ -22,10 +23,8 @@ import {
 import {
   apiKeyOf,
   completeLogin,
-  listDevices,
   mintSessionJwt,
   parseRefresh,
-  pickDevice,
   refreshCredential,
 } from "./src/auth.mjs"
 import { chromiumLogin, findBrowser } from "./src/browser.mjs"
@@ -38,7 +37,14 @@ import {
   staticModels,
 } from "./src/catalog.mjs"
 import { chatCompletions } from "./src/chat.mjs"
-import { CapyLocalImportError, readCapyInstall } from "./src/local.mjs"
+import {
+  HEADLESS_NAME,
+  HeadlessDevice,
+  loadHeadlessState,
+  pairHeadlessDevice,
+  saveHeadlessState,
+  waitForDevice,
+} from "./src/headless.mjs"
 import { createProxyFetch, resolveProxyUrl } from "./src/proxy.mjs"
 import {
   CODES,
@@ -66,7 +72,6 @@ async function readJsonBody(input, init) {
 }
 
 function loginErrorText(error) {
-  if (error instanceof CapyLocalImportError) return error.message
   const status = Number(error?.status) || 0
   const code = String(error?.code ?? "")
   if (status === 401) return "Capy 登录已失效，请重新登录"
@@ -90,7 +95,6 @@ export const CapyAuthPlugin = async (_ctx = {}, options = {}) => {
     },
   })
   const findBrowserImpl = typeof options?.findBrowser === "function" ? options.findBrowser : findBrowser
-  const readLocalImpl = typeof options?.readLocal === "function" ? options.readLocal : readCapyInstall
   const chromiumLoginImpl = typeof options?.chromiumLogin === "function" ? options.chromiumLogin : chromiumLogin
 
   let maxConcurrency = DEFAULT_MAX_CONCURRENCY
@@ -126,18 +130,84 @@ export const CapyAuthPlugin = async (_ctx = {}, options = {}) => {
       return await run(auth)
     } catch (error) {
       if (!isAuthFailure(error)) throw error
-      const renewed = await refreshCredential(fetchImpl, auth, {
-        readLocal: readLocalImpl,
-        forceSession: true,
-      }).catch(() => null)
+      const renewed = await refreshCredential(fetchImpl, auth).catch(() => null)
       if (!renewed?.access) throw error
       const merged = { ...auth, ...renewed, metadata: { ...(auth?.metadata ?? {}), ...(renewed.metadata ?? {}) } }
       return await run(merged)
     }
   }
 
-  // 额度卡片里的「桌面端」状态：浏览器登录只拿到登录态，免费模型还需要一台在线设备。
-  // 15 秒缓存，避免每次刷新额度都 mint JWT + 列设备。
+  // 无头设备：首次使用自动注册 magpie-headless，之后复用 DPAPI 加密的本地状态。
+  // MAGPIE_CAPY_HEADLESS=off 可以关闭。
+  const injectedHeadless = typeof options?.headless === "function" ? options.headless : null
+  const headlessMode = String(
+    typeof options?.headless === "string"
+      ? options.headless
+      : process.env.MAGPIE_CAPY_HEADLESS
+        ?? "auto",
+  ).trim().toLowerCase()
+  const headlessEnabled = Boolean(injectedHeadless)
+    || !["off", "0", "false", "no", "desktop"].includes(headlessMode)
+  let headlessDevice = null
+  let headlessInfo = null
+  let headlessStarting = null
+
+  async function startHeadless(auth, { jwt, orgId, signal } = {}) {
+    if (injectedHeadless) return await injectedHeadless({ jwt, orgId, signal })
+    if (!headlessEnabled) return null
+    if (process.platform !== "win32") return null
+    if (typeof Bun === "undefined") return null
+    if (!jwt || !orgId) {
+      throw new Error("无头设备需要 Clerk 会话与 orgId")
+    }
+    if (headlessDevice && headlessInfo?.orgId === orgId) {
+      try {
+        await headlessDevice.ensure()
+        return headlessInfo
+      } catch {
+        try { headlessDevice.close() } catch {}
+        headlessDevice = null
+        headlessInfo = null
+      }
+    }
+    if (headlessStarting) return await headlessStarting
+
+    headlessStarting = (async () => {
+      const cred = parseRefresh(auth?.refresh)
+      const clientId = String(cred?.clientId || auth?.metadata?.clientId || "").trim()
+      let state = loadHeadlessState()
+      if (!state || state.orgId !== orgId) {
+        state = await pairHeadlessDevice(fetchImpl, { jwt, orgId, clientId, signal })
+        saveHeadlessState(state)
+      }
+      let device = new HeadlessDevice({ credential: state })
+      try {
+        await device.ensure()
+      } catch (error) {
+        // token 被吊销或设备状态过期：重新配对一次。
+        device.close()
+        state = await pairHeadlessDevice(fetchImpl, { jwt, orgId, clientId, signal })
+        saveHeadlessState(state)
+        device = new HeadlessDevice({ credential: state })
+        await device.ensure()
+      }
+      const hit = await waitForDevice(fetchImpl, jwt, orgId, state.deviceId, { timeoutMs: 15_000, signal })
+      if (!hit) {
+        device.close()
+        throw new Error("无头设备已连上隧道，但服务端没有把它标记为 connected")
+      }
+      headlessDevice = device
+      headlessInfo = state
+      return { deviceId: state.deviceId, name: state.name || HEADLESS_NAME }
+    })()
+    try {
+      return await headlessStarting
+    } finally {
+      headlessStarting = null
+    }
+  }
+
+  // 额度卡片的「无头设备」状态；15 秒缓存。
   const deviceCache = new Map()
   const DEVICE_TTL_MS = 15_000
   async function deviceStatus(auth) {
@@ -154,11 +224,10 @@ export const CapyAuthPlugin = async (_ctx = {}, options = {}) => {
       })
       const orgId = String(cred.orgId || auth?.metadata?.orgId || "").trim()
       if (!orgId) return { connected: false, unknown: true }
-      const devices = await listDevices(fetchImpl, jwt, orgId)
-      const device = pickDevice(devices, cred.deviceId || auth?.metadata?.deviceId || "")
+      const info = await startHeadless(auth, { jwt, orgId })
       const value = {
-        connected: Boolean(device),
-        name: String(device?.name ?? ""),
+        connected: Boolean(info),
+        name: String(info?.name || ""),
       }
       deviceCache.set(key, { at: Date.now(), value })
       return value
@@ -192,40 +261,6 @@ export const CapyAuthPlugin = async (_ctx = {}, options = {}) => {
       methods: [
         {
           type: "oauth",
-          label: "从本机 Capy 客户端导入（推荐）",
-          async authorize() {
-            // authorize 里不能 await 用户/网络：读文件与换票都放 callback。
-            const probe = Promise.resolve()
-              .then(async () => {
-                const local = await readLocalImpl()
-                return await completeLogin(fetchImpl, {
-                  clientJwt: local.clientJwt,
-                  sessionId: local.sessionId,
-                  userId: local.userId,
-                  orgId: local.orgId,
-                  accountId: local.accountId,
-                  source: "capy-desktop",
-                })
-              })
-            probe.catch(() => {})
-            return {
-              url: BASE,
-              opened: true,
-              method: "auto",
-              instructions: "正在读取本机 Capy 登录态（需要已安装并登录 Capy 桌面端）…",
-              async callback() {
-                try {
-                  return await probe
-                } catch (error) {
-                  return { type: "failed", error: loginErrorText(error) }
-                }
-              },
-            }
-          },
-        },
-
-        {
-          type: "oauth",
           label: "浏览器登录（Google / GitHub / Passkey / 邮箱）",
           async authorize() {
             const controller = new AbortController()
@@ -234,8 +269,7 @@ export const CapyAuthPlugin = async (_ctx = {}, options = {}) => {
                 if (!findBrowserImpl()) {
                   throw Object.assign(new Error(
                     "没有找到 Chromium 内核浏览器（Chrome / Edge / 360极速 / QQ 等）。"
-                    + "请安装 Chrome 或 Edge，或设置 MAGPIE_CAPY_BROWSER 指向浏览器 exe；"
-                    + "也可以改用「从本机 Capy 客户端导入」。",
+                    + "请安装 Chrome 或 Edge，或设置 MAGPIE_CAPY_BROWSER 指向浏览器 exe。",
                   ), { code: "browser_not_found" })
                 }
                 const browser = await chromiumLoginImpl({
@@ -261,7 +295,8 @@ export const CapyAuthPlugin = async (_ctx = {}, options = {}) => {
               instructions:
                 "已打开 Capy 官方登录页。用页面上的任意一种方式登录："
                 + "Google、GitHub、Passkey（Windows Hello / 指纹 / PIN）或邮箱验证码。"
-                + "登录成功后会自动读完登录态并关闭窗口，不需要复制任何东西。",
+                + "登录成功后会自动读完登录态并关闭窗口，不需要复制任何东西。"
+                + "首次对话会自动注册一台 magpie-headless 设备，不需要 Capy 桌面端。",
               close: () => controller.abort(),
               async callback(_value, { signal } = {}) {
                 const onAbort = () => controller.abort()
@@ -283,7 +318,7 @@ export const CapyAuthPlugin = async (_ctx = {}, options = {}) => {
       // ═══ ③ 续期：API key 长期有效，定期校验；失效就用 Clerk 会话重签 ═══
       async refresh(auth) {
         try {
-          return await refreshCredential(fetchImpl, auth, { readLocal: readLocalImpl })
+          return await refreshCredential(fetchImpl, auth)
         } catch (error) {
           if (isAuthFailure(error) || error?.signIn === "expired") {
             throw Object.assign(new Error("Capy 登录已失效，请重新登录"), { signIn: "expired" })
@@ -364,6 +399,11 @@ export const CapyAuthPlugin = async (_ctx = {}, options = {}) => {
                   reasoningMode,
                   promptVariant: promptVariantNow(),
                   onVariantFallback,
+                  headless: ({ jwt, orgId, signal: requestSignal }) => startHeadless(current, {
+                    jwt,
+                    orgId,
+                    signal: requestSignal,
+                  }),
                 })
               })
               return result
@@ -395,15 +435,15 @@ export const CapyAuthPlugin = async (_ctx = {}, options = {}) => {
             usage.windows = [
               ...(usage.windows || []),
               {
-                name: "桌面端",
+                name: "无头设备",
                 // 只是展示项；aside 不参与路由排序，但 used 仍必须是有限值。
                 used: status.connected ? 0 : 100,
                 aside: true,
                 display: status.unknown
-                  ? "状态未知（请打开 Capy / 重新登录）"
+                  ? "状态未知（重新登录 / 检查网络）"
                   : status.connected
                     ? `已连接${status.name ? ` · ${status.name}` : ""}`
-                    : "未连接（免费模型需打开 Capy）",
+                    : "未连接（自动注册失败，看插件日志）",
               },
             ]
           }

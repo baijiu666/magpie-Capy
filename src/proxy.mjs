@@ -134,6 +134,11 @@ export function createProxyFetch(baseFetch, proxyUrl, { onWarn } = {}) {
     warned = true
     try { onWarn?.(message) } catch {}
   }
+  const proxyConnectionError = (error) => (
+    /ECONNREFUSED|ConnectionRefused|Unable to connect|proxy connect|proxy server/iu.test(
+      String(error?.message ?? error),
+    )
+  )
 
   return async function proxyFetch(input, init = {}) {
     const target = typeof input === "string"
@@ -152,10 +157,18 @@ export function createProxyFetch(baseFetch, proxyUrl, { onWarn } = {}) {
       try {
         return await base(input, { ...init, proxy: url })
       } catch (error) {
+        if (proxyConnectionError(error)) {
+          warn(`代理 ${url} 连接失败，本次直连`)
+          return base(input, init)
+        }
         // 宿主包装过的 fetch 可能不认识 proxy；退回全局 fetch。
         try {
           return await fetch(input, { ...init, proxy: url })
-        } catch {
+        } catch (inner) {
+          if (proxyConnectionError(inner)) {
+            warn(`代理 ${url} 连接失败，本次直连`)
+            return base(input, init)
+          }
           throw error
         }
       }

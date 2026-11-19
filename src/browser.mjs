@@ -14,7 +14,7 @@ import { execFileSync, spawn } from "node:child_process"
 import { Buffer } from "node:buffer"
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { createServer } from "node:net"
-import { homedir, tmpdir } from "node:os"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 export const CAPY_ORIGIN = "https://capy.ai"
@@ -307,47 +307,6 @@ export function pickOrg(orgIds, stored = []) {
     if (id && ids.includes(id)) return id
   }
   return ids[0]
-}
-
-/** Capy 桌面端 device-credentials.json → 第一个 orgId。 */
-export function firstDeviceOrg(raw) {
-  let value = raw
-  if (typeof value === "string") {
-    try { value = JSON.parse(value) } catch { return "" }
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value)) return ""
-  const orgs = value.orgs
-  if (Array.isArray(orgs)) {
-    for (const item of orgs) {
-      const id = typeof item === "string" ? item.trim() : String(item?.id ?? item?.orgId ?? "").trim()
-      if (id) return id
-    }
-  } else if (orgs && typeof orgs === "object") {
-    for (const key of Object.keys(orgs)) {
-      const id = key.trim()
-      if (id) return id
-    }
-  }
-  const direct = value.orgId ?? value.organizationId
-  return typeof direct === "string" ? direct.trim() : ""
-}
-
-/** Capy 桌面端配置目录（只读，用来兜底 orgId）。 */
-export function capyConfigDir(env = process.env, platformName = process.platform, home = homedir()) {
-  if (platformName === "win32") {
-    const appData = env.APPDATA || join(home, "AppData", "Roaming")
-    return join(appData, "Capy")
-  }
-  if (platformName === "darwin") return join(home, "Library", "Application Support", "Capy")
-  return join(env.XDG_CONFIG_HOME || join(home, ".config"), "Capy")
-}
-
-function readDeviceOrg() {
-  try {
-    return firstDeviceOrg(readFileSync(join(capyConfigDir(), "device-credentials.json"), "utf8"))
-  } catch {
-    return ""
-  }
 }
 
 /** 页面上可能同时有多个 page target；优先 capy.ai/app，其次 capy.ai，再次普通页面。 */
@@ -898,7 +857,7 @@ export async function chromiumLogin({
             } else {
               let orgInfo = null
               try { orgInfo = await readOrganizations(page) } catch {}
-              const orgId = pickOrg(orgInfo?.ids, [orgInfo?.selected, orgInfo?.last]) || readDeviceOrg()
+              const orgId = pickOrg(orgInfo?.ids, [orgInfo?.selected, orgInfo?.last])
               const result = {
                 clientJwt,
                 sessionId: state.sessionId,
@@ -967,8 +926,6 @@ export const _internal = {
   findClientJwt,
   isClientJwt,
   pickOrg,
-  firstDeviceOrg,
-  capyConfigDir,
   pickPageTarget,
   browserArgs,
   normalizeCookieValue,

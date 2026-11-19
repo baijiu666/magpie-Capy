@@ -1,4 +1,4 @@
-// OpenAI /chat/completions → Capy **桌面端本机设备线程**，回答走公共 API 的原生 SSE。
+// OpenAI /chat/completions → Capy **无头设备线程**，回答走公共 API 的原生 SSE。
 //
 // 上游事实（2026-11-19 实测）：
 //   · 建线程：POST /app/orgs/{orgId}/jams（projectless + device/worktree）
@@ -23,7 +23,7 @@ import { isAdsModel } from "./catalog.mjs"
 import { collectAttachments, uploadAttachments } from "./attachments.mjs"
 import { CODES, chatErrorStatus, errorCode, fromUpstream, upstreamError } from "./errors.mjs"
 import { authHeaders, requestJson, sleep } from "./http.mjs"
-import { listDevices, mintSessionJwt, parseRefresh, pickDevice } from "./auth.mjs"
+import { mintSessionJwt, parseRefresh } from "./auth.mjs"
 import { hasTools, parseToolCalls, toolCallId, toolInstruction } from "./tools.mjs"
 
 export const MAX_PROMPT_CHARS = 160_000
@@ -196,11 +196,11 @@ function appHeaders(jwt, clientId, { ads = false } = {}) {
   }
 }
 
-/** 从账号记录里恢复 Clerk 会话，并挑一台已连接的桌面设备。 */
-export async function resolveDeviceSession(fetchImpl, auth, { signal } = {}) {
+/** 从账号记录里恢复 Clerk 会话，并拿到无头设备。 */
+export async function resolveDeviceSession(fetchImpl, auth, { signal, headless } = {}) {
   const cred = parseRefresh(auth?.refresh)
   if (!cred?.clientJwt || !cred?.sessionId) {
-    throw upstreamError("Capy 登录态不完整（缺少桌面会话），请重新登录", 401, {
+    throw upstreamError("Capy 登录态不完整（缺少 Clerk 会话），请重新登录", 401, {
       code: CODES.signInRequired,
     })
   }
@@ -215,21 +215,36 @@ export async function resolveDeviceSession(fetchImpl, auth, { signal } = {}) {
       code: CODES.signInRequired,
     })
   }
-  const devices = await listDevices(fetchImpl, jwt, orgId, { signal })
-  const device = pickDevice(devices, cred.deviceId || auth?.metadata?.deviceId || "")
-  if (!device) {
+  if (typeof headless !== "function") {
     throw upstreamError(
-      "这个账号没有已连接的 Capy 桌面端。免费模型必须在本机 Capy 的 Worktree 里运行；"
-      + "浏览器登录只提供登录态，不提供算力。请用同一账号打开 Capy 桌面端并保持在线"
-      + "（本机 / Worktree 模式），或充值后使用云端模型。",
+      "无头设备未启用。请重启 magpie，或显式打开 MAGPIE_CAPY_HEADLESS。",
       503,
       { code: CODES.upstreamUnavailable },
     )
   }
+
+  let info
+  try {
+    info = await headless({ jwt, orgId, signal })
+  } catch (error) {
+    if (Number(error?.status)) throw error
+    throw upstreamError(
+      `注册/连接无头设备失败：${String(error?.message ?? error)}`,
+      503,
+      { code: CODES.upstreamUnavailable },
+    )
+  }
+  const deviceId = String(info?.deviceId || info?.device?.id || info?.id || "").trim()
+  if (!deviceId) {
+    throw upstreamError("无头设备没有返回 deviceId", 503, { code: CODES.upstreamUnavailable })
+  }
   return {
     jwt,
     orgId,
-    device,
+    device: {
+      id: deviceId,
+      name: String(info?.name || info?.device?.name || "magpie-headless"),
+    },
     clientId: String(cred.clientId || auth?.metadata?.clientId || "").trim(),
   }
 }
@@ -299,7 +314,7 @@ export async function createDeviceThread(fetchImpl, {
   if (!body?.id) throw upstreamError("Capy 创建本机线程没有返回 id", 502, { code: "upstream_error" })
   if (body?.primaryMachine?.kind !== "device") {
     throw upstreamError(
-      "Capy 没有把线程放到本机设备（返回了云端机器）。请确认桌面端在线，并在 Capy 里允许本机 / Worktree 运行。",
+      "Capy 没有把线程放到无头设备（返回了云端机器）。请检查无头设备是否 connected；必要时删掉 %LOCALAPPDATA%\magpie-capy\headless-device.json 让它重新配对。",
       503,
       { code: CODES.upstreamUnavailable, detail: `primaryMachine=${body?.primaryMachine?.kind ?? "unknown"}` },
     )
@@ -339,13 +354,13 @@ export function askError(thread) {
   }
   if (ask.kind === "desktop") {
     return upstreamError(
-      ask.text || "Capy 桌面端需要处理这个线程，请打开 Capy 桌面端。",
+      ask.text || "Capy 线程需要人工/桌面端操作，无头设备无法继续；请在 Capy 网页端处理。",
       503,
       { code: CODES.upstreamUnavailable, detail: "ask.kind=desktop" },
     )
   }
   return upstreamError(
-    `Capy 线程需要人工处理：${ask.text || ask.kind || "未知阻塞"}。请在 Capy 桌面端里处理。`,
+    `Capy 线程需要人工处理：${ask.text || ask.kind || "未知阻塞"}。请在 Capy 网页端里处理。`,
     409,
     { code: "upstream_error", detail: `ask.kind=${ask.kind ?? ""}` },
   )
@@ -660,13 +675,14 @@ export async function runThread(fetchImpl, auth, {
   reasoningMode = "",
   promptVariant = "",
   attachments = [],
+  headless,
   signal,
   onThread,
   onDelta,
   onVariantFallback,
   timeoutMs,
 } = {}) {
-  const session = await resolveDeviceSession(fetchImpl, auth, { signal })
+  const session = await resolveDeviceSession(fetchImpl, auth, { signal, headless })
   const ads = isAdsModel(modelId)
   const files = await uploadAttachments(fetchImpl, auth?.access, attachments, { signal })
 
@@ -770,6 +786,7 @@ export async function chatCompletions({
   modelId,
   reasoningMode,
   promptVariant = "",
+  headless,
   onThread,
   onVariantFallback,
 }) {
@@ -789,6 +806,7 @@ export async function chatCompletions({
       reasoningMode,
       promptVariant,
       attachments: prepared.attachments,
+      headless,
       signal,
       onThread,
       onVariantFallback,
@@ -828,6 +846,7 @@ export async function chatCompletions({
           reasoningMode,
           promptVariant,
           attachments: prepared.attachments,
+          headless,
           signal: controller.signal,
           onThread: (thread, session) => {
             threadId = String(thread?.id ?? "")

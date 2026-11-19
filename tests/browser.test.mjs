@@ -7,11 +7,9 @@ const {
   CAPY_URL,
   browserArgs,
   browserCandidates,
-  capyConfigDir,
   findBrowser,
   findClientJwt,
   findCookie,
-  firstDeviceOrg,
   isClientJwt,
   parseDevToolsPort,
   pickOrg,
@@ -100,28 +98,6 @@ test("pickOrg 处理对象数组和空列表", () => {
   assert.equal(pickOrg([{ id: "org_c" }, { id: "org_d" }], ["org_d"]), "org_d")
   assert.equal(pickOrg([], ["org_a"]), "")
   assert.equal(pickOrg(null, ["org_a"]), "")
-})
-
-test("firstDeviceOrg 读 device-credentials.json 的第一个组织", () => {
-  assert.equal(firstDeviceOrg({ version: 1, orgs: { org_first: {}, org_second: {} } }), "org_first")
-  assert.equal(firstDeviceOrg({ orgs: [{ id: "org_y" }] }), "org_y")
-  assert.equal(firstDeviceOrg(JSON.stringify({ orgs: { org_z: {} } })), "org_z")
-  assert.equal(firstDeviceOrg({ orgId: "org_direct" }), "org_direct")
-  assert.equal(firstDeviceOrg(null), "")
-  assert.equal(firstDeviceOrg("not-json"), "")
-  assert.equal(firstDeviceOrg({ orgs: {} }), "")
-  assert.equal(firstDeviceOrg([1, 2]), "")
-})
-
-test("capyConfigDir 指向各平台的 Capy 配置目录", () => {
-  const win = capyConfigDir({ APPDATA: "C:\\Users\\x\\AppData\\Roaming" }, "win32", "C:\\Users\\x")
-  assert.match(win, /Capy$/u)
-  assert.match(win, /AppData/u)
-  const mac = capyConfigDir({}, "darwin", "/Users/x")
-  assert.match(mac, /Capy$/u)
-  assert.match(mac, /Application Support/u)
-  const linux = capyConfigDir({ XDG_CONFIG_HOME: "/home/x/.config" }, "linux", "/home/x")
-  assert.match(linux, /Capy$/u)
 })
 
 test("MAGPIE_CAPY_BROWSER 覆盖候选列表", () => {

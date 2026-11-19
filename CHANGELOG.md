@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.5.0 — 2026-11-20
+
+**去掉 Capy 桌面端依赖，改成纯无头设备。**
+
+- 删除 `src/local.mjs`、本机导入登录、`%APPDATA%\Capy` 凭据读取、桌面端设备选择代码。
+- 登录只剩浏览器登录（Google / GitHub / Passkey / 邮箱）。
+- 首次对话自动走设备码配对：
+  `POST /app/devices/code` → 自动 approve → poll，注册 **`magpie-headless`**，拿到 `capyd_…` token。
+- 新增 `src/headless.mjs`：
+  - device tunnel `wss://device-tunnel-production.cloud.capy.ai/tunnel`（`Authorization: Bearer capyd_…`）；
+  - `hello` / `session-config` / `ready` / ping-pong；
+  - 最小 machine server：`worktree_list` / `worktree_ensure` / `volume_landed` / `volume_probe` /
+    `git capture`；终端/浏览器/写文件返回 `MachineServer.Unavailable`。
+- device token 用 Windows DPAPI 加密存在 `%LOCALAPPDATA%\magpie-capy\headless-device.json`。
+- 实测：无桌面端、`magpie-headless` 设备，`particle-1` 回答 `pong` **8.9 秒**。
+- 额度卡片去掉「本期消费」，新增「无头设备」状态。
+- 96 个离线测试。
+
 ## 0.4.1 — 2026-11-20
 
 额度卡片与「必须连接桌面端」的解释。

@@ -6,15 +6,16 @@
 
 | code | status | 什么时候 | 宿主/用户看到 |
 |---|---|---|---|
-| `invalid_request` | 400 | 请求体不是 JSON、messages 为空、对话超过 160k 字符、没有 projectId | 请求本身的问题，不换号 |
+| `invalid_request` | 400 | 请求体不是 JSON、messages 为空、对话超过 160k 字符、附件非法 | 请求本身的问题，不换号 |
 | `model_not_found` | 404 | `resolveModel` 不认识这个 id；Capy 回 `ModelSelection.Rejected` | 只搁置这个模型，其它模型照用 |
 | `sign_in_required` | 401 | API Key 缺失/吊销；Clerk 换票失败；`/app/*` 401 | 让宿主把这个账号标成「需要重新登录」 |
 | `insufficient_quota` | 402 | `/usage/balance` 无余额，或线程 `ask.kind=credits` | 提示用户去 Capy 充值/订阅 |
 | `region_unsupported` | 403 | 免费广告模型 + 出口 IP 不在 US/CA/UK/AU/NZ/IE | 换支持地区的代理，或改用 `particle/particle-1` |
+| `device_pair_failed` | 403 | 设备码 start/approve/poll 失败、被拒绝或过期 | 重新登录；检查 `MAGPIE_CAPY_HEADLESS` 与网络 |
 | `upstream_error` | 403 | Capy 回 `capy/Forbidden`（账号/套餐/入口不允许） | 不自动重试；检查登录方式与地区 |
 | `prompt_variant_forbidden` | 403 | 账号不允许 `promptVariant:"minimal"` | 插件内部捕获并改回 default，不暴露给用户 |
 | `rate_limited` | 429 | Capy 回 `capy/RateLimited` | 透传 `retry-after`，换号或退避 |
-| `upstream_unavailable` | 503 | Capy 5xx、连不上、DNS/代理失败、流提前断开 | 可重试，换号/退避 |
+| `upstream_unavailable` | 503 | Capy 5xx、连不上、DNS/代理失败、无头设备未连接、流提前断开 | 可重试，换号/退避 |
 | `upstream_timeout` | 504 | 连接 Capy 超时；原生 SSE 空闲超过 90s | 可重试 |
 | `upstream_error` | 502 | 无法归类的 4xx / 线程没有产生 assistant 文本 | 不自动重试 |
 | `internal_error` | 502 | 插件自己的 bug | 请求失败，看日志 |
@@ -28,6 +29,15 @@
 | `POST /files` 或预签名 PUT 失败 | `upstream_error` / 502 |
 | 下载远程附件 / 上传超时 | `upstream_timeout` / 504 |
 | 上传需要 API key 但未登录 | `sign_in_required` / 401 |
+
+## 无头设备错误
+
+| 场景 | code / status |
+|---|---|
+| `POST /devices/code` / approve / poll 失败、拒绝、过期 | `device_pair_failed` / 403 |
+| device tunnel 连不上、`hello/ready` 超时、`/devices` 没有 connected | `upstream_unavailable` / 503 |
+| `%LOCALAPPDATA%\magpie-capy\headless-device.json` 解不开 / token 失效 | 插件自动重新配对（不直接报错） |
+| machine server handler 未实现（terminal/browser/write） | 返回 `MachineServer.Unavailable`，由 agent 处理 |
 
 ## 三条容易写错的
 
