@@ -193,6 +193,59 @@ const SELECTED_ORG = `(() => {
   } catch { return ""; }
 })()`;
 
+/**
+ * Capy 的 onboarding 页有前端崩溃（removeChild NotFoundError），
+ * 崩掉之后页面目标就读不出任何东西；但 Cookie 属于浏览器进程，
+ * 换一个空白标签页照样能读。
+ */
+async function openPage(port: number, url: string, signal: AbortSignal): Promise<CdpConnection> {
+  const target = `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`;
+  const response = await fetch(target, { method: "PUT" });
+  if (!response.ok) throw new CapyError("upstream_unavailable", "浏览器无法新开标签页");
+  const record = (await response.json()) as Record<string, unknown>;
+  const wsUrl = String(record.webSocketDebuggerUrl ?? "");
+  if (!wsUrl) throw new CapyError("upstream_unavailable", "浏览器没有返回调试地址");
+  const ws = new WebSocket(wsUrl);
+  await waitOpen(ws, signal);
+  return new CdpConnection(ws);
+}
+
+/**
+ * 页面崩了就读不了 Clerk 的 DOM，但 `__session` 是 Clerk 自己签的 JWT，
+ * sid / sub 都在里面 —— 读它就不依赖页面还活着。
+ */
+export function sessionClaimsOf(token: string): { sessionId: string; userId: string } | null {
+  const part = String(token ?? "").split(".")[1];
+  if (!part) return null;
+  try {
+    const normalized = part.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    const payload = JSON.parse(Buffer.from(padded, "base64").toString("utf8")) as Record<string, unknown>;
+    const sessionId = typeof payload.sid === "string" ? payload.sid : "";
+    const userId = typeof payload.sub === "string" ? payload.sub : "";
+    return sessionId && userId ? { sessionId, userId } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readCookies(cdp: CdpConnection): Promise<Map<string, string>> {
+  const jar = new Map<string, string>();
+  for (const method of ["Network.getAllCookies", "Storage.getCookies"] as const) {
+    let result: unknown;
+    try { result = await cdp.send(method); } catch { continue; }
+    const record = result as { cookies?: unknown } | null;
+    const cookies = Array.isArray(record?.cookies) ? record.cookies : [];
+    for (const cookie of cookies) {
+      if (!cookie || typeof cookie !== "object") continue;
+      const value = cookie as Record<string, unknown>;
+      if (typeof value.name === "string" && typeof value.value === "string") jar.set(value.name, value.value);
+    }
+    if (jar.size > 0) return jar;
+  }
+  return jar;
+}
+
 async function readCookie(cdp: CdpConnection): Promise<string> {
   for (const method of ["Network.getAllCookies", "Storage.getCookies"] as const) {
     let result: unknown;
@@ -323,6 +376,7 @@ async function chromiumLogin(options: {
     const deadline = Date.now() + timeoutMs;
     let sawClerk = false;
     let sawCookieProblem = false;
+    let lastFallback = 0;
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       if (child && browserExited(child)) {
@@ -355,6 +409,35 @@ async function chromiumLogin(options: {
       } catch (error) {
         if (signal.aborted) throw abortError();
         if (error instanceof CapyError && error.kind === "sign_in_required") throw error;
+        // Capy 的 onboarding 页会前端崩溃（removeChild NotFoundError）。
+        // 崩掉的是页面，不是登录：Cookie 和 __session 还在浏览器进程里，
+        // 用空白标签页补一次，别让一次前端崩溃把整次登录判死。
+        if (Date.now() - lastFallback > 6_000) {
+          lastFallback = Date.now();
+          try {
+            const spare = await openPage(port, "about:blank", signal);
+            try {
+              const jar = await readCookies(spare);
+              const clientJwt = jar.get("__client") ?? "";
+              const claims = clientJwt ? sessionClaimsOf(jar.get("__session") ?? "") : null;
+              if (clientJwt && claims) {
+                const credential: LoginCredential = {
+                  clientJwt,
+                  sessionId: claims.sessionId,
+                  userId: claims.userId,
+                  clientId: clientIdOf(clientJwt),
+                  source: "browser",
+                };
+                return credential;
+              }
+              if (clientJwt) sawCookieProblem = true;
+            } finally {
+              spare.close();
+            }
+          } catch {
+            // 拿不到就继续轮询，超时由外层统一报
+          }
+        }
       } finally {
         cdp?.close();
       }

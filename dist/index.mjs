@@ -1472,6 +1472,57 @@ var SELECTED_ORG = `(() => {
       || "";
   } catch { return ""; }
 })()`;
+async function openPage(port, url, signal) {
+  const target = `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`;
+  const response = await fetch(target, { method: "PUT" });
+  if (!response.ok)
+    throw new CapyError("upstream_unavailable", "\u6D4F\u89C8\u5668\u65E0\u6CD5\u65B0\u5F00\u6807\u7B7E\u9875");
+  const record = await response.json();
+  const wsUrl = String(record.webSocketDebuggerUrl ?? "");
+  if (!wsUrl)
+    throw new CapyError("upstream_unavailable", "\u6D4F\u89C8\u5668\u6CA1\u6709\u8FD4\u56DE\u8C03\u8BD5\u5730\u5740");
+  const ws = new WebSocket(wsUrl);
+  await waitOpen(ws, signal);
+  return new CdpConnection(ws);
+}
+function sessionClaimsOf(token) {
+  const part = String(token ?? "").split(".")[1];
+  if (!part)
+    return null;
+  try {
+    const normalized = part.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+    const payload = JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
+    const sessionId = typeof payload.sid === "string" ? payload.sid : "";
+    const userId = typeof payload.sub === "string" ? payload.sub : "";
+    return sessionId && userId ? { sessionId, userId } : null;
+  } catch {
+    return null;
+  }
+}
+async function readCookies(cdp) {
+  const jar = new Map;
+  for (const method of ["Network.getAllCookies", "Storage.getCookies"]) {
+    let result;
+    try {
+      result = await cdp.send(method);
+    } catch {
+      continue;
+    }
+    const record = result;
+    const cookies = Array.isArray(record?.cookies) ? record.cookies : [];
+    for (const cookie of cookies) {
+      if (!cookie || typeof cookie !== "object")
+        continue;
+      const value = cookie;
+      if (typeof value.name === "string" && typeof value.value === "string")
+        jar.set(value.name, value.value);
+    }
+    if (jar.size > 0)
+      return jar;
+  }
+  return jar;
+}
 async function readCookie(cdp) {
   for (const method of ["Network.getAllCookies", "Storage.getCookies"]) {
     let result;
@@ -1592,6 +1643,7 @@ async function chromiumLogin(options = {}) {
     const deadline = Date.now() + timeoutMs;
     let sawClerk = false;
     let sawCookieProblem = false;
+    let lastFallback = 0;
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       if (child && browserExited(child)) {
@@ -1628,6 +1680,31 @@ async function chromiumLogin(options = {}) {
           throw abortError();
         if (error instanceof CapyError && error.kind === "sign_in_required")
           throw error;
+        if (Date.now() - lastFallback > 6000) {
+          lastFallback = Date.now();
+          try {
+            const spare = await openPage(port, "about:blank", signal);
+            try {
+              const jar = await readCookies(spare);
+              const clientJwt = jar.get("__client") ?? "";
+              const claims = clientJwt ? sessionClaimsOf(jar.get("__session") ?? "") : null;
+              if (clientJwt && claims) {
+                const credential = {
+                  clientJwt,
+                  sessionId: claims.sessionId,
+                  userId: claims.userId,
+                  clientId: clientIdOf(clientJwt),
+                  source: "browser"
+                };
+                return credential;
+              }
+              if (clientJwt)
+                sawCookieProblem = true;
+            } finally {
+              spare.close();
+            }
+          } catch {}
+        }
       } finally {
         cdp?.close();
       }
