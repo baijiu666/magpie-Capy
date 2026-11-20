@@ -234,16 +234,36 @@ function freePort(): Promise<number> {
   });
 }
 
-function launchArgs(port: number, profile: string): string[] {
+export function launchArgs(port: number, profile: string): string[] {
   return [
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`,
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-extensions",
+    // 少了这一条，Chromium 会把 navigator.webdriver 露成 true；
+    // Cloudflare Turnstile 一旦读到它，就是「勾了验证框也过不去」。
+    "--disable-blink-features=AutomationControlled",
     "--disable-background-networking",
     LOGIN_URL,
   ];
+}
+
+/**
+ * 登录浏览器的配置目录必须是同一份。
+ * Turnstile 把「每次都是全新浏览器」判成高风险：验证框反复出现，
+ * 而且过了也不留 clearance，于是每次登录都卡在同一步。
+ * 位置遵循 magpie 的缓存约定，可用 MAGPIE_CAPY_PROFILE 覆盖。
+ */
+export function browserProfilePath(env: Record<string, string | undefined> = process.env): string {
+  const override = String(env.MAGPIE_CAPY_PROFILE ?? "").trim().replace(/^"|"$/gu, "");
+  return override || path.join(os.homedir(), ".cache", "magpie", "capy-browser-profile");
+}
+
+export function browserProfileDir(env: Record<string, string | undefined> = process.env): string {
+  const dir = browserProfilePath(env);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 function browserExited(child: ChildProcess): boolean {
@@ -278,7 +298,7 @@ async function chromiumLogin(options: {
   }
   const signal = options.signal ?? new AbortController().signal;
   const timeoutMs = Math.max(10_000, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "magpie-capy-"));
+  const profile = browserProfileDir();
   let child: ChildProcess | null = null;
   try {
     let port = 0;
@@ -348,10 +368,8 @@ async function chromiumLogin(options: {
     }
     throw new CapyError("upstream_timeout", "等待 Capy 浏览器登录超时，请重试");
   } finally {
+    // 只收进程，保留 profile：删掉它等于把 Turnstile 的 clearance 和登录态一起丢了。
     try { child?.kill("SIGTERM"); } catch {}
-    setTimeout(() => {
-      try { fs.rmSync(profile, { recursive: true, force: true }); } catch {}
-    }, 1000).unref?.();
   }
 }
 

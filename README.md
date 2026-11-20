@@ -73,6 +73,10 @@ domain: 纯类型/错误/事件，不依赖 I/O
 
 ## 无头设备与工具
 
+浏览器登录会在 `~/.cache/magpie/capy-browser-profile` 复用同一份浏览器配置（可用 `MAGPIE_CAPY_PROFILE` 覆盖）：
+Cloudflare Turnstile 会把「每次都是全新浏览器」判成高风险，导致验证框反复出现、过了也不留 clearance。
+这份配置里存着登录态与人机验证结果，删掉它等于下次重新验证一次。
+
 设备名默认取 `os.hostname()`（这台机器是 `baijiu`）；可用 `MAGPIE_CAPY_DEVICE_NAME` 覆盖。
 已有设备会通过 `PATCH /app/orgs/{org}/devices/{id}` 自动重命名，不需要重新配对。
 Capy 设置里如果还留着旧的 `magpie-headless` 设备，可以在设备页面手动删除；插件只使用当前主机名这台。

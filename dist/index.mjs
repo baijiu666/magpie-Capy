@@ -1,6 +1,4 @@
 // @bun
-var __require = import.meta.require;
-
 // src/adapters/capy/static-catalog.ts
 var STATIC_CATALOG = [
   {
@@ -1527,9 +1525,19 @@ function launchArgs(port, profile) {
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-extensions",
+    "--disable-blink-features=AutomationControlled",
     "--disable-background-networking",
     LOGIN_URL
   ];
+}
+function browserProfilePath(env = process.env) {
+  const override = String(env.MAGPIE_CAPY_PROFILE ?? "").trim().replace(/^"|"$/gu, "");
+  return override || path2.join(os3.homedir(), ".cache", "magpie", "capy-browser-profile");
+}
+function browserProfileDir(env = process.env) {
+  const dir = browserProfilePath(env);
+  fs2.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 function browserExited(child) {
   return child.exitCode !== null || child.signalCode !== null;
@@ -1555,7 +1563,7 @@ async function chromiumLogin(options = {}) {
   }
   const signal = options.signal ?? new AbortController().signal;
   const timeoutMs = Math.max(1e4, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const profile = fs2.mkdtempSync(path2.join(os3.tmpdir(), "magpie-capy-"));
+  const profile = browserProfileDir();
   let child = null;
   try {
     let port = 0;
@@ -1633,11 +1641,6 @@ async function chromiumLogin(options = {}) {
     try {
       child?.kill("SIGTERM");
     } catch {}
-    setTimeout(() => {
-      try {
-        fs2.rmSync(profile, { recursive: true, force: true });
-      } catch {}
-    }, 1000).unref?.();
   }
 }
 
@@ -2587,11 +2590,11 @@ class CapyPublicClient {
     }
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      let body2 = null;
+      let body = null;
       try {
-        body2 = JSON.parse(text);
+        body = JSON.parse(text);
       } catch {}
-      throw mapUpstream(response.status, body2, text.slice(0, 300));
+      throw mapUpstream(response.status, body, text.slice(0, 300));
     }
     if (!response.body)
       throw new CapyError("upstream_unavailable", "Capy \u6D41\u6CA1\u6709\u54CD\u5E94\u4F53");
@@ -3848,8 +3851,8 @@ function normalizeCalls(value) {
   for (const item of raw) {
     if (!item || typeof item !== "object")
       continue;
-    const record2 = item;
-    const fn = record2.function ?? record2;
+    const record = item;
+    const fn = record.function ?? record;
     const name = typeof fn.name === "string" ? fn.name.trim() : "";
     if (!name)
       continue;
@@ -4510,7 +4513,7 @@ async function CapyNextPlugin(_ctx = {}, options = {}) {
             try {
               if (method === "GET" && /\/models$/u.test(route)) {
                 const models = await modelsFor(session);
-                return encodeModelList(Object.values(models).map((model2) => ({ id: model2.id, name: model2.name })), providerId);
+                return encodeModelList(Object.values(models).map((model) => ({ id: model.id, name: model.name })), providerId);
               }
               if (!/\/chat\/completions$/u.test(route)) {
                 return encodeErrorResponse(new CapyError("not_implemented", `\u8BE5\u7AEF\u70B9\u6CA1\u6709\u5B9E\u73B0\uFF1A${method} ${url}`));
