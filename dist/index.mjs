@@ -1644,6 +1644,32 @@ async function chromiumLogin(options = {}) {
     let sawClerk = false;
     let sawCookieProblem = false;
     let lastFallback = 0;
+    const spareCredential = async () => {
+      if (Date.now() - lastFallback < 6000)
+        return null;
+      lastFallback = Date.now();
+      const spare = await openPage(port, "about:blank", signal);
+      try {
+        const jar = await readCookies(spare);
+        const clientJwt = jar.get("__client") ?? "";
+        if (!clientJwt)
+          return null;
+        const claims = sessionClaimsOf(jar.get("__session") ?? "");
+        if (!claims) {
+          sawCookieProblem = true;
+          return null;
+        }
+        return {
+          clientJwt,
+          sessionId: claims.sessionId,
+          userId: claims.userId,
+          clientId: clientIdOf(clientJwt),
+          source: "browser"
+        };
+      } finally {
+        spare.close();
+      }
+    };
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       if (child && browserExited(child)) {
@@ -1674,37 +1700,19 @@ async function chromiumLogin(options = {}) {
             };
             return credential;
           }
+        } else {
+          const fallback = await spareCredential().catch(() => null);
+          if (fallback)
+            return fallback;
         }
       } catch (error) {
         if (signal.aborted)
           throw abortError();
         if (error instanceof CapyError && error.kind === "sign_in_required")
           throw error;
-        if (Date.now() - lastFallback > 6000) {
-          lastFallback = Date.now();
-          try {
-            const spare = await openPage(port, "about:blank", signal);
-            try {
-              const jar = await readCookies(spare);
-              const clientJwt = jar.get("__client") ?? "";
-              const claims = clientJwt ? sessionClaimsOf(jar.get("__session") ?? "") : null;
-              if (clientJwt && claims) {
-                const credential = {
-                  clientJwt,
-                  sessionId: claims.sessionId,
-                  userId: claims.userId,
-                  clientId: clientIdOf(clientJwt),
-                  source: "browser"
-                };
-                return credential;
-              }
-              if (clientJwt)
-                sawCookieProblem = true;
-            } finally {
-              spare.close();
-            }
-          } catch {}
-        }
+        const fallback = await spareCredential().catch(() => null);
+        if (fallback)
+          return fallback;
       } finally {
         cdp?.close();
       }

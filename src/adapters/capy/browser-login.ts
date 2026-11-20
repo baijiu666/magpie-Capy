@@ -377,6 +377,33 @@ async function chromiumLogin(options: {
     let sawClerk = false;
     let sawCookieProblem = false;
     let lastFallback = 0;
+
+    // 页面还在、但 window.Clerk 没暴露（生产构建常见）也要能收尾：
+    // Cookie 与 __session 不经过页面，空白标签页就能读到。
+    const spareCredential = async (): Promise<LoginCredential | null> => {
+      if (Date.now() - lastFallback < 6_000) return null;
+      lastFallback = Date.now();
+      const spare = await openPage(port, "about:blank", signal);
+      try {
+        const jar = await readCookies(spare);
+        const clientJwt = jar.get("__client") ?? "";
+        if (!clientJwt) return null;
+        const claims = sessionClaimsOf(jar.get("__session") ?? "");
+        if (!claims) {
+          sawCookieProblem = true;
+          return null;
+        }
+        return {
+          clientJwt,
+          sessionId: claims.sessionId,
+          userId: claims.userId,
+          clientId: clientIdOf(clientJwt),
+          source: "browser",
+        };
+      } finally {
+        spare.close();
+      }
+    };
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       if (child && browserExited(child)) {
@@ -405,6 +432,11 @@ async function chromiumLogin(options: {
             };
             return credential;
           }
+        } else {
+          // window.Clerk 在生产构建里没有暴露时，状态恒为空；
+          // 此时只能靠 Cookie 与 __session，否则会空转到超时。
+          const fallback = await spareCredential().catch(() => null);
+          if (fallback) return fallback;
         }
       } catch (error) {
         if (signal.aborted) throw abortError();
@@ -412,32 +444,8 @@ async function chromiumLogin(options: {
         // Capy 的 onboarding 页会前端崩溃（removeChild NotFoundError）。
         // 崩掉的是页面，不是登录：Cookie 和 __session 还在浏览器进程里，
         // 用空白标签页补一次，别让一次前端崩溃把整次登录判死。
-        if (Date.now() - lastFallback > 6_000) {
-          lastFallback = Date.now();
-          try {
-            const spare = await openPage(port, "about:blank", signal);
-            try {
-              const jar = await readCookies(spare);
-              const clientJwt = jar.get("__client") ?? "";
-              const claims = clientJwt ? sessionClaimsOf(jar.get("__session") ?? "") : null;
-              if (clientJwt && claims) {
-                const credential: LoginCredential = {
-                  clientJwt,
-                  sessionId: claims.sessionId,
-                  userId: claims.userId,
-                  clientId: clientIdOf(clientJwt),
-                  source: "browser",
-                };
-                return credential;
-              }
-              if (clientJwt) sawCookieProblem = true;
-            } finally {
-              spare.close();
-            }
-          } catch {
-            // 拿不到就继续轮询，超时由外层统一报
-          }
-        }
+        const fallback = await spareCredential().catch(() => null);
+        if (fallback) return fallback;
       } finally {
         cdp?.close();
       }
