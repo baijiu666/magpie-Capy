@@ -1,6 +1,4 @@
 // @bun
-var __require = import.meta.require;
-
 // src/adapters/capy/static-catalog.ts
 var STATIC_CATALOG = [
   {
@@ -1474,6 +1472,57 @@ var SELECTED_ORG = `(() => {
       || "";
   } catch { return ""; }
 })()`;
+async function openPage(port, url, signal) {
+  const target = `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`;
+  const response = await fetch(target, { method: "PUT" });
+  if (!response.ok)
+    throw new CapyError("upstream_unavailable", "\u6D4F\u89C8\u5668\u65E0\u6CD5\u65B0\u5F00\u6807\u7B7E\u9875");
+  const record = await response.json();
+  const wsUrl = String(record.webSocketDebuggerUrl ?? "");
+  if (!wsUrl)
+    throw new CapyError("upstream_unavailable", "\u6D4F\u89C8\u5668\u6CA1\u6709\u8FD4\u56DE\u8C03\u8BD5\u5730\u5740");
+  const ws = new WebSocket(wsUrl);
+  await waitOpen(ws, signal);
+  return new CdpConnection(ws);
+}
+function sessionClaimsOf(token) {
+  const part = String(token ?? "").split(".")[1];
+  if (!part)
+    return null;
+  try {
+    const normalized = part.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+    const payload = JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
+    const sessionId = typeof payload.sid === "string" ? payload.sid : "";
+    const userId = typeof payload.sub === "string" ? payload.sub : "";
+    return sessionId && userId ? { sessionId, userId } : null;
+  } catch {
+    return null;
+  }
+}
+async function readCookies(cdp) {
+  const jar = new Map;
+  for (const method of ["Network.getAllCookies", "Storage.getCookies"]) {
+    let result;
+    try {
+      result = await cdp.send(method);
+    } catch {
+      continue;
+    }
+    const record = result;
+    const cookies = Array.isArray(record?.cookies) ? record.cookies : [];
+    for (const cookie of cookies) {
+      if (!cookie || typeof cookie !== "object")
+        continue;
+      const value = cookie;
+      if (typeof value.name === "string" && typeof value.value === "string")
+        jar.set(value.name, value.value);
+    }
+    if (jar.size > 0)
+      return jar;
+  }
+  return jar;
+}
 async function readCookie(cdp) {
   for (const method of ["Network.getAllCookies", "Storage.getCookies"]) {
     let result;
@@ -1527,9 +1576,19 @@ function launchArgs(port, profile) {
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-extensions",
+    "--disable-blink-features=AutomationControlled",
     "--disable-background-networking",
     LOGIN_URL
   ];
+}
+function browserProfilePath(env = process.env) {
+  const override = String(env.MAGPIE_CAPY_PROFILE ?? "").trim().replace(/^"|"$/gu, "");
+  return override || path2.join(os3.homedir(), ".cache", "magpie", "capy-browser-profile");
+}
+function browserProfileDir(env = process.env) {
+  const dir = browserProfilePath(env);
+  fs2.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 function browserExited(child) {
   return child.exitCode !== null || child.signalCode !== null;
@@ -1555,7 +1614,7 @@ async function chromiumLogin(options = {}) {
   }
   const signal = options.signal ?? new AbortController().signal;
   const timeoutMs = Math.max(1e4, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const profile = fs2.mkdtempSync(path2.join(os3.tmpdir(), "magpie-capy-"));
+  const profile = browserProfileDir();
   let child = null;
   try {
     let port = 0;
@@ -1584,6 +1643,33 @@ async function chromiumLogin(options = {}) {
     const deadline = Date.now() + timeoutMs;
     let sawClerk = false;
     let sawCookieProblem = false;
+    let lastFallback = 0;
+    const spareCredential = async () => {
+      if (Date.now() - lastFallback < 6000)
+        return null;
+      lastFallback = Date.now();
+      const spare = await openPage(port, "about:blank", signal);
+      try {
+        const jar = await readCookies(spare);
+        const clientJwt = jar.get("__client") ?? "";
+        if (!clientJwt)
+          return null;
+        const claims = sessionClaimsOf(jar.get("__session") ?? "");
+        if (!claims) {
+          sawCookieProblem = true;
+          return null;
+        }
+        return {
+          clientJwt,
+          sessionId: claims.sessionId,
+          userId: claims.userId,
+          clientId: clientIdOf(clientJwt),
+          source: "browser"
+        };
+      } finally {
+        spare.close();
+      }
+    };
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       if (child && browserExited(child)) {
@@ -1614,12 +1700,19 @@ async function chromiumLogin(options = {}) {
             };
             return credential;
           }
+        } else {
+          const fallback = await spareCredential().catch(() => null);
+          if (fallback)
+            return fallback;
         }
       } catch (error) {
         if (signal.aborted)
           throw abortError();
         if (error instanceof CapyError && error.kind === "sign_in_required")
           throw error;
+        const fallback = await spareCredential().catch(() => null);
+        if (fallback)
+          return fallback;
       } finally {
         cdp?.close();
       }
@@ -1633,11 +1726,6 @@ async function chromiumLogin(options = {}) {
     try {
       child?.kill("SIGTERM");
     } catch {}
-    setTimeout(() => {
-      try {
-        fs2.rmSync(profile, { recursive: true, force: true });
-      } catch {}
-    }, 1000).unref?.();
   }
 }
 
@@ -2587,11 +2675,11 @@ class CapyPublicClient {
     }
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      let body2 = null;
+      let body = null;
       try {
-        body2 = JSON.parse(text);
+        body = JSON.parse(text);
       } catch {}
-      throw mapUpstream(response.status, body2, text.slice(0, 300));
+      throw mapUpstream(response.status, body, text.slice(0, 300));
     }
     if (!response.body)
       throw new CapyError("upstream_unavailable", "Capy \u6D41\u6CA1\u6709\u54CD\u5E94\u4F53");
@@ -3848,8 +3936,8 @@ function normalizeCalls(value) {
   for (const item of raw) {
     if (!item || typeof item !== "object")
       continue;
-    const record2 = item;
-    const fn = record2.function ?? record2;
+    const record = item;
+    const fn = record.function ?? record;
     const name = typeof fn.name === "string" ? fn.name.trim() : "";
     if (!name)
       continue;
@@ -4510,7 +4598,7 @@ async function CapyNextPlugin(_ctx = {}, options = {}) {
             try {
               if (method === "GET" && /\/models$/u.test(route)) {
                 const models = await modelsFor(session);
-                return encodeModelList(Object.values(models).map((model2) => ({ id: model2.id, name: model2.name })), providerId);
+                return encodeModelList(Object.values(models).map((model) => ({ id: model.id, name: model.name })), providerId);
               }
               if (!/\/chat\/completions$/u.test(route)) {
                 return encodeErrorResponse(new CapyError("not_implemented", `\u8BE5\u7AEF\u70B9\u6CA1\u6709\u5B9E\u73B0\uFF1A${method} ${url}`));

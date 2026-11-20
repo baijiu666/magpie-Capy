@@ -193,6 +193,59 @@ const SELECTED_ORG = `(() => {
   } catch { return ""; }
 })()`;
 
+/**
+ * Capy 的 onboarding 页有前端崩溃（removeChild NotFoundError），
+ * 崩掉之后页面目标就读不出任何东西；但 Cookie 属于浏览器进程，
+ * 换一个空白标签页照样能读。
+ */
+async function openPage(port: number, url: string, signal: AbortSignal): Promise<CdpConnection> {
+  const target = `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`;
+  const response = await fetch(target, { method: "PUT" });
+  if (!response.ok) throw new CapyError("upstream_unavailable", "浏览器无法新开标签页");
+  const record = (await response.json()) as Record<string, unknown>;
+  const wsUrl = String(record.webSocketDebuggerUrl ?? "");
+  if (!wsUrl) throw new CapyError("upstream_unavailable", "浏览器没有返回调试地址");
+  const ws = new WebSocket(wsUrl);
+  await waitOpen(ws, signal);
+  return new CdpConnection(ws);
+}
+
+/**
+ * 页面崩了就读不了 Clerk 的 DOM，但 `__session` 是 Clerk 自己签的 JWT，
+ * sid / sub 都在里面 —— 读它就不依赖页面还活着。
+ */
+export function sessionClaimsOf(token: string): { sessionId: string; userId: string } | null {
+  const part = String(token ?? "").split(".")[1];
+  if (!part) return null;
+  try {
+    const normalized = part.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+    const payload = JSON.parse(Buffer.from(padded, "base64").toString("utf8")) as Record<string, unknown>;
+    const sessionId = typeof payload.sid === "string" ? payload.sid : "";
+    const userId = typeof payload.sub === "string" ? payload.sub : "";
+    return sessionId && userId ? { sessionId, userId } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readCookies(cdp: CdpConnection): Promise<Map<string, string>> {
+  const jar = new Map<string, string>();
+  for (const method of ["Network.getAllCookies", "Storage.getCookies"] as const) {
+    let result: unknown;
+    try { result = await cdp.send(method); } catch { continue; }
+    const record = result as { cookies?: unknown } | null;
+    const cookies = Array.isArray(record?.cookies) ? record.cookies : [];
+    for (const cookie of cookies) {
+      if (!cookie || typeof cookie !== "object") continue;
+      const value = cookie as Record<string, unknown>;
+      if (typeof value.name === "string" && typeof value.value === "string") jar.set(value.name, value.value);
+    }
+    if (jar.size > 0) return jar;
+  }
+  return jar;
+}
+
 async function readCookie(cdp: CdpConnection): Promise<string> {
   for (const method of ["Network.getAllCookies", "Storage.getCookies"] as const) {
     let result: unknown;
@@ -234,16 +287,36 @@ function freePort(): Promise<number> {
   });
 }
 
-function launchArgs(port: number, profile: string): string[] {
+export function launchArgs(port: number, profile: string): string[] {
   return [
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`,
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-extensions",
+    // 少了这一条，Chromium 会把 navigator.webdriver 露成 true；
+    // Cloudflare Turnstile 一旦读到它，就是「勾了验证框也过不去」。
+    "--disable-blink-features=AutomationControlled",
     "--disable-background-networking",
     LOGIN_URL,
   ];
+}
+
+/**
+ * 登录浏览器的配置目录必须是同一份。
+ * Turnstile 把「每次都是全新浏览器」判成高风险：验证框反复出现，
+ * 而且过了也不留 clearance，于是每次登录都卡在同一步。
+ * 位置遵循 magpie 的缓存约定，可用 MAGPIE_CAPY_PROFILE 覆盖。
+ */
+export function browserProfilePath(env: Record<string, string | undefined> = process.env): string {
+  const override = String(env.MAGPIE_CAPY_PROFILE ?? "").trim().replace(/^"|"$/gu, "");
+  return override || path.join(os.homedir(), ".cache", "magpie", "capy-browser-profile");
+}
+
+export function browserProfileDir(env: Record<string, string | undefined> = process.env): string {
+  const dir = browserProfilePath(env);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 function browserExited(child: ChildProcess): boolean {
@@ -278,7 +351,7 @@ async function chromiumLogin(options: {
   }
   const signal = options.signal ?? new AbortController().signal;
   const timeoutMs = Math.max(10_000, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), "magpie-capy-"));
+  const profile = browserProfileDir();
   let child: ChildProcess | null = null;
   try {
     let port = 0;
@@ -303,6 +376,34 @@ async function chromiumLogin(options: {
     const deadline = Date.now() + timeoutMs;
     let sawClerk = false;
     let sawCookieProblem = false;
+    let lastFallback = 0;
+
+    // 页面还在、但 window.Clerk 没暴露（生产构建常见）也要能收尾：
+    // Cookie 与 __session 不经过页面，空白标签页就能读到。
+    const spareCredential = async (): Promise<LoginCredential | null> => {
+      if (Date.now() - lastFallback < 6_000) return null;
+      lastFallback = Date.now();
+      const spare = await openPage(port, "about:blank", signal);
+      try {
+        const jar = await readCookies(spare);
+        const clientJwt = jar.get("__client") ?? "";
+        if (!clientJwt) return null;
+        const claims = sessionClaimsOf(jar.get("__session") ?? "");
+        if (!claims) {
+          sawCookieProblem = true;
+          return null;
+        }
+        return {
+          clientJwt,
+          sessionId: claims.sessionId,
+          userId: claims.userId,
+          clientId: clientIdOf(clientJwt),
+          source: "browser",
+        };
+      } finally {
+        spare.close();
+      }
+    };
     while (Date.now() < deadline) {
       throwIfAborted(signal);
       if (child && browserExited(child)) {
@@ -331,10 +432,20 @@ async function chromiumLogin(options: {
             };
             return credential;
           }
+        } else {
+          // window.Clerk 在生产构建里没有暴露时，状态恒为空；
+          // 此时只能靠 Cookie 与 __session，否则会空转到超时。
+          const fallback = await spareCredential().catch(() => null);
+          if (fallback) return fallback;
         }
       } catch (error) {
         if (signal.aborted) throw abortError();
         if (error instanceof CapyError && error.kind === "sign_in_required") throw error;
+        // Capy 的 onboarding 页会前端崩溃（removeChild NotFoundError）。
+        // 崩掉的是页面，不是登录：Cookie 和 __session 还在浏览器进程里，
+        // 用空白标签页补一次，别让一次前端崩溃把整次登录判死。
+        const fallback = await spareCredential().catch(() => null);
+        if (fallback) return fallback;
       } finally {
         cdp?.close();
       }
@@ -348,10 +459,8 @@ async function chromiumLogin(options: {
     }
     throw new CapyError("upstream_timeout", "等待 Capy 浏览器登录超时，请重试");
   } finally {
+    // 只收进程，保留 profile：删掉它等于把 Turnstile 的 clearance 和登录态一起丢了。
     try { child?.kill("SIGTERM"); } catch {}
-    setTimeout(() => {
-      try { fs.rmSync(profile, { recursive: true, force: true }); } catch {}
-    }, 1000).unref?.();
   }
 }
 
